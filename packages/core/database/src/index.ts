@@ -1,33 +1,53 @@
 import type { Knex } from 'knex';
 
+import path from 'node:path';
 import { Dialect, getDialect } from './dialects';
 import { createSchemaProvider, SchemaProvider } from './schema';
 import { createMetadata, Metadata } from './metadata';
 import { createEntityManager, EntityManager } from './entity-manager';
-import { createMigrationsProvider, MigrationProvider } from './migrations';
+import { createMigrationsProvider, MigrationProvider, type Migration } from './migrations';
 import { createLifecyclesProvider, LifecycleProvider } from './lifecycles';
 import { createConnection } from './connection';
 import * as errors from './errors';
 import { Callback, transactionCtx, TransactionObject } from './transaction-context';
-
-// TODO: move back into strapi
-import { transformContentTypes } from './utils/content-types';
 import { validateDatabase } from './validations';
-import { Model } from './types';
+import type { Model } from './types';
+import type { Identifiers } from './utils/identifiers';
+import { createRepairManager, type RepairManager } from './repairs';
 
 export { isKnexQuery } from './utils/knex';
 
 interface Settings {
   forceMigration?: boolean;
   runMigrations?: boolean;
+  migrations: {
+    dir: string;
+  };
   [key: string]: unknown;
 }
+
+export type Logger = Record<
+  'info' | 'warn' | 'error' | 'debug',
+  (message: string | Record<string, unknown>) => void
+>;
 
 export interface DatabaseConfig {
   connection: Knex.Config;
   settings: Settings;
-  models: Model[];
+  logger?: Logger;
 }
+
+const afterCreate =
+  (db: Database) =>
+  (
+    nativeConnection: unknown,
+    done: (error: Error | null, nativeConnection: unknown) => Promise<void>
+  ) => {
+    // run initialize for it since commands such as postgres SET and sqlite PRAGMA are per-connection
+    db.dialect.initialize(nativeConnection).then(() => {
+      return done(null, nativeConnection);
+    });
+  };
 
 class Database {
   connection: Knex;
@@ -46,17 +66,11 @@ class Database {
 
   entityManager: EntityManager;
 
-  static transformContentTypes = transformContentTypes;
+  repair: RepairManager;
 
-  static async init(config: DatabaseConfig) {
-    const db = new Database(config);
-    await validateDatabase(db);
-    return db;
-  }
+  logger: Logger;
 
   constructor(config: DatabaseConfig) {
-    this.metadata = createMetadata(config.models);
-
     this.config = {
       ...config,
       settings: {
@@ -66,12 +80,38 @@ class Database {
       },
     };
 
+    this.logger = config.logger ?? console;
+
     this.dialect = getDialect(this);
-    this.dialect.configure();
 
-    this.connection = createConnection(this.config.connection);
+    let knexConfig: Knex.Config = this.config.connection;
 
-    this.dialect.initialize();
+    // for object connections, we can configure the dialect synchronously
+    if (typeof this.config.connection.connection !== 'function') {
+      this.dialect.configure();
+    }
+    // for connection functions, we wrap it so that we can modify it with dialect configure before it reaches knex
+    else {
+      this.logger.warn(
+        'Knex connection functions are currently experimental. Attempting to access the connection object before database initialization will result in errors.'
+      );
+
+      knexConfig = {
+        ...this.config.connection,
+        connection: async () => {
+          // @ts-expect-error confirmed it was a function above
+          const conn = await this.config.connection.connection();
+          this.dialect.configure(conn);
+          return conn;
+        },
+      };
+    }
+
+    this.metadata = createMetadata([]);
+
+    this.connection = createConnection(knexConfig, {
+      pool: { afterCreate: afterCreate(this) },
+    });
 
     this.schema = createSchemaProvider(this);
 
@@ -79,6 +119,35 @@ class Database {
     this.lifecycles = createLifecyclesProvider(this);
 
     this.entityManager = createEntityManager(this);
+
+    this.repair = createRepairManager(this);
+  }
+
+  async init({ models }: { models: Model[] }) {
+    if (typeof this.config.connection.connection === 'function') {
+      /*
+       * User code needs to be able to access `connection.connection` directly as if
+       * it were always an object. For a connection function, that doesn't happen
+       * until the pool is created, so we need to do that here
+       *
+       * TODO: In the next major version, we need to replace all internal code that
+       * directly references `connection.connection` prior to init, and make a breaking
+       * change that it cannot be relied on to exist before init so that we can call
+       * this feature stable.
+       */
+      this.logger.debug('Forcing Knex to make real connection to db');
+
+      // sqlite does not support connection pooling so acquireConnection doesn't work
+      if (this.config.connection.client === 'sqlite') {
+        await this.connection.raw('SELECT 1');
+      } else {
+        await this.connection.client.acquireConnection();
+      }
+    }
+
+    this.metadata.loadModels(models);
+    await validateDatabase(this);
+    return this;
   }
 
   query(uid: string) {
@@ -150,6 +219,34 @@ class Database {
     return schema ? connection.withSchema(schema) : connection;
   }
 
+  // Returns basic info about the database connection
+  getInfo() {
+    const connectionSettings = this.connection?.client?.connectionSettings || {};
+    const client = this.dialect?.client || '';
+
+    let displayName = '';
+    let schema;
+
+    // For SQLite, get the relative filename
+    if (client === 'sqlite') {
+      const absolutePath = connectionSettings?.filename;
+      if (absolutePath) {
+        displayName = path.relative(process.cwd(), absolutePath);
+      }
+    }
+    // For other dialects, get the database name
+    else {
+      displayName = connectionSettings?.database;
+      schema = connectionSettings?.schema;
+    }
+
+    return {
+      displayName,
+      schema,
+      client,
+    };
+  }
+
   getSchemaConnection(trx = this.connection) {
     const schema = this.getSchemaName();
     return schema ? trx.schema.withSchema(schema) : trx.schema;
@@ -166,3 +263,4 @@ class Database {
 }
 
 export { Database, errors };
+export type { Model, Identifiers, Migration };

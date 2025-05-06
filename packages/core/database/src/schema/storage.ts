@@ -24,14 +24,32 @@ export default (db: Database) => {
   };
 
   return {
-    async read() {
+    async read(): Promise<{
+      id: number;
+      time: Date;
+      hash: string;
+      schema: Schema;
+    } | null> {
       await checkTableExists();
+
+      // NOTE: We get the ID first before fetching the exact entry for performance on MySQL/MariaDB
+      // See: https://github.com/strapi/strapi/issues/20312
+      const getSchemaID = await db
+        .getConnection()
+        .select('id')
+        .from(TABLE_NAME)
+        .orderBy('time', 'DESC')
+        .first();
+
+      if (!getSchemaID) {
+        return null;
+      }
 
       const res = await db
         .getConnection()
         .select('*')
         .from(TABLE_NAME)
-        .orderBy('time', 'DESC')
+        .where({ id: getSchemaID.id })
         .first();
 
       if (!res) {

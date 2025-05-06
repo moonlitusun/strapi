@@ -1,6 +1,6 @@
 export interface FeaturesConfig {
   future?: {
-    contentReleases?: boolean;
+    unstableWidgetsApi?: boolean;
   };
 }
 

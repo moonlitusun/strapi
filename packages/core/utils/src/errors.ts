@@ -8,7 +8,7 @@ import { formatYupErrors } from './format-yup-error';
 class ApplicationError<
   TName extends string = 'ApplicationError',
   TMessage extends string = string,
-  TDetails = unknown
+  TDetails = unknown,
 > extends Error {
   name: TName;
 
@@ -29,7 +29,7 @@ class ApplicationError<
 
 class ValidationError<
   TMessage extends string = string,
-  TDetails = unknown
+  TDetails = unknown,
 > extends ApplicationError<'ValidationError', TMessage, TDetails> {
   constructor(message: TMessage, details?: TDetails) {
     super(message, details);
@@ -41,6 +41,7 @@ interface YupFormattedError {
   path: string[];
   message: string;
   name: string;
+  value: string;
 }
 
 class YupValidationError<TMessage extends string = string> extends ValidationError<
@@ -57,7 +58,7 @@ class YupValidationError<TMessage extends string = string> extends ValidationErr
 
 class PaginationError<
   TMessage extends string = string,
-  TDetails = unknown
+  TDetails = unknown,
 > extends ApplicationError<'PaginationError', TMessage, TDetails> {
   constructor(message = 'Invalid pagination' as TMessage, details?: TDetails) {
     super(message, details);
@@ -81,7 +82,7 @@ class NotFoundError<TMessage extends string = string, TDetails = unknown> extend
 class ForbiddenError<
   TName extends string = 'ForbiddenError',
   TMessage extends string = string,
-  TDetails = unknown
+  TDetails = unknown,
 > extends ApplicationError<TName, TMessage, TDetails> {
   constructor(message = 'Forbidden access' as TMessage, details?: TDetails) {
     super(message, details);
@@ -92,7 +93,7 @@ class ForbiddenError<
 
 class UnauthorizedError<
   TMessage extends string = string,
-  TDetails = unknown
+  TDetails = unknown,
 > extends ApplicationError<'UnauthorizedError', TMessage, TDetails> {
   constructor(message = 'Unauthorized' as TMessage, details?: TDetails) {
     super(message, details);
@@ -119,7 +120,7 @@ class RateLimitError<TMessage extends string = string, TDetails = unknown> exten
 
 class PayloadTooLargeError<
   TMessage extends string = string,
-  TDetails = unknown
+  TDetails = unknown,
 > extends ApplicationError<'PayloadTooLargeError', TMessage, TDetails> {
   constructor(message = 'Entity too large' as TMessage, details?: TDetails) {
     super(message, details);
@@ -143,7 +144,7 @@ class PolicyError<TMessage extends string = string, TDetails = unknown> extends 
 
 class NotImplementedError<
   TMessage extends string = string,
-  TDetails = unknown
+  TDetails = unknown,
 > extends ApplicationError<'NotImplementedError', TMessage, TDetails> {
   constructor(message = 'This feature is not implemented yet' as TMessage, details?: TDetails) {
     super(message, details);

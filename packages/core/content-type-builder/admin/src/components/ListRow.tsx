@@ -1,11 +1,10 @@
 import { memo } from 'react';
 
 import { Box, Flex, IconButton, Typography } from '@strapi/design-system';
-import { onRowClick, pxToRem, stopPropagation } from '@strapi/helper-plugin';
 import { Lock, Pencil, Trash } from '@strapi/icons';
 import get from 'lodash/get';
 import { useIntl } from 'react-intl';
-import styled from 'styled-components';
+import { styled } from 'styled-components';
 
 import { useDataManager } from '../hooks/useDataManager';
 import { Curve } from '../icons/Curve';
@@ -15,7 +14,7 @@ import { AttributeIcon, IconByType } from './AttributeIcon';
 import { DisplayedType } from './DisplayedType';
 import { UpperFirst } from './UpperFirst';
 
-import type { CustomFieldUID } from '@strapi/helper-plugin';
+import type { SchemaType } from '../types';
 
 export const BoxWrapper = styled(Box)`
   position: relative;
@@ -23,8 +22,8 @@ export const BoxWrapper = styled(Box)`
 
 type ListRowProps = {
   configurable?: boolean;
-  customField?: CustomFieldUID | null;
-  editTarget: string;
+  customField?: string | null;
+  editTarget: SchemaType;
   firstLoopComponentUid?: string | null;
   isFromDynamicZone?: boolean;
   name: string;
@@ -104,22 +103,21 @@ export const ListRow = memo(
 
     return (
       <BoxWrapper
-        as="tr"
-        {...onRowClick({
-          fn: handleClick,
-          condition: isInDevelopmentMode && configurable && !isMorph,
-        })}
+        tag="tr"
+        onClick={isInDevelopmentMode && configurable && !isMorph ? handleClick : undefined}
       >
         <td style={{ position: 'relative' }}>
           {loopNumber !== 0 && <Curve color={isFromDynamicZone ? 'primary200' : 'neutral150'} />}
           <Flex paddingLeft={2} gap={4}>
             <AttributeIcon type={src} customField={customField} />
-            <Typography fontWeight="bold">{name}</Typography>
+            <Typography textColor="neutral800" fontWeight="bold">
+              {name}
+            </Typography>
           </Flex>
         </td>
         <td>
           {target ? (
-            <Typography>
+            <Typography textColor="neutral800">
               {formatMessage({
                 id: getTrad(
                   `modelPage.attribute.${isMorph ? 'relation-polymorphic' : 'relationWith'}`
@@ -143,7 +141,7 @@ export const ListRow = memo(
         </td>
         <td>
           {isInDevelopmentMode ? (
-            <Flex justifyContent="flex-end" {...stopPropagation}>
+            <Flex justifyContent="flex-end" onClick={(e) => e.stopPropagation()}>
               {configurable ? (
                 <Flex gap={1}>
                   {!isMorph && (
@@ -153,9 +151,10 @@ export const ListRow = memo(
                         id: 'app.utils.edit',
                         defaultMessage: 'Edit',
                       })} ${name}`}
-                      noBorder
-                      icon={<Pencil />}
-                    />
+                      variant="ghost"
+                    >
+                      <Pencil />
+                    </IconButton>
                   )}
                   <IconButton
                     onClick={(e) => {
@@ -170,9 +169,10 @@ export const ListRow = memo(
                       id: 'global.delete',
                       defaultMessage: 'Delete',
                     })} ${name}`}
-                    noBorder
-                    icon={<Trash />}
-                  />
+                    variant="ghost"
+                  >
+                    <Trash />
+                  </IconButton>
                 </Flex>
               ) : (
                 <Lock />
@@ -184,7 +184,7 @@ export const ListRow = memo(
             we need to reserve the same space, otherwise the height of the
             row might collapse, leading to bad positioned curve icons
           */
-            <Box height={pxToRem(32)} />
+            <Box height="3.2rem" />
           )}
         </td>
       </BoxWrapper>

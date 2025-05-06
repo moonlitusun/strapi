@@ -5,11 +5,15 @@ type ID = number | string;
 
 export type Data = {
   id?: ID;
+  __component?: string;
+  __type?: string;
   [key: string]: string | number | ID | boolean | null | undefined | Date | Data | Data[];
 };
 
-export interface Config {
-  get<T = unknown>(key: string, defaultVal?: T): T;
+export type Config = Record<string, unknown>;
+
+export interface RelationOrderingOptions {
+  strict?: boolean;
 }
 
 export interface Attribute {
@@ -90,16 +94,16 @@ declare module 'koa' {
   }
 
   interface ExtendableContext {
-    ok: (response?: string | object) => Koa.Context;
-    created: (response?: string | object) => Koa.Context;
-    noContent: (response?: string | object) => Koa.Context;
-    badRequest: (response?: string | object) => Koa.Context;
-    unauthorized: (response?: string | object) => Koa.Context;
-    forbidden: (response?: string | object) => Koa.Context;
-    notFound: (response?: string | object) => Koa.Context;
-    locked: (response?: string | object) => Koa.Context;
-    internalServerError: (response?: string | object) => Koa.Context;
-    notImplemented: (response?: string | object) => Koa.Context;
+    ok: (response?: string | object, details?: object) => Koa.Context;
+    created: (response?: string | object, details?: object) => Koa.Context;
+    noContent: (response?: string | object, details?: object) => Koa.Context;
+    badRequest: (response?: string | object, details?: object) => Koa.Context;
+    unauthorized: (response?: string | object, details?: object) => Koa.Context;
+    forbidden: (response?: string | object, details?: object) => Koa.Context;
+    notFound: (response?: string | object, details?: object) => Koa.Context;
+    locked: (response?: string | object, details?: object) => Koa.Context;
+    internalServerError: (response?: string | object, details?: object) => Koa.Context;
+    notImplemented: (response?: string | object, data?: Record<string, unknown>) => Koa.Context;
   }
 }
 

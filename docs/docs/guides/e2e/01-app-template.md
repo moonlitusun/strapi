@@ -15,57 +15,297 @@ Here you can read about what content schemas the test instance has & the API cus
 
 ## Update the app template
 
+:::info
+The app template should be realistic and structured in a way an actual user might create an app using Strapi
+:::
+
 To update the app template:
 
-- run the tests to create a Strapi app based on the existing template at `test-apps/e2e/test-app-<number>`.
-- Move into this folder and run `yarn develop`.
-- Login using the credentials found in `e2e/constants.js`.
-- Make any changes you need (i.e. create a content-type).
-- Kill the server and run [[`yarn strapi templates:generate <path>`]](https://docs.strapi.io/dev-docs/cli#strapi-templatesgenerate).
-- Replace the existing template in `e2e/app-template` with the newly generated one.
+- Run `yarn test:e2e clean` to remove existing test apps
+- Run `yarn test:e2e -c=1 -- --ui` to generate a test app (don't run any tests)
+- Follow the instructions to [import the existing data set](./02-data-transfer.md#importing-an-existing-data-packet)
+- With the test app server running on 1337 you can now login to the app
+- Make changes in the content-type builder
+- Copy the generated files in the test app to the app template
+
+Once the app template is updated:
+
+- Run `yarn test:e2e clean` to remove existing test apps
+- Run `yarn test:e2e -c=1 -- --ui` to generate a new test app using the updated template (don't run any tests)
+- Follow the instructions to [import the existing data set](./02-data-transfer.md#importing-an-existing-data-packet)
+- Follow the instructions to [export the updated data set](./02-data-transfer.md#exporting-an-updated-data-packet)
 
 ## Content Schemas
 
 ### Article
 
-A collection type, the schema can be found in: `e2e/app-template/template/src/api/article/content-types/article/schema.json`
+```json
+{
+  // ...
+  "attributes": {
+    "title": {
+      "type": "string"
+    },
+    "content": {
+      "type": "blocks"
+    },
+    "authors": {
+      "type": "relation",
+      "relation": "manyToMany",
+      "target": "api::author.author",
+      "inversedBy": "articles"
+    }
+  }
+  // ...
+}
+```
 
 ### Author
 
-A collection type, the schema can be found in `e2e/app-template/template/src/api/article/content-types/author/schema.json`
-
-### Homepage
-
-A single type, the schema can be found in `e2e/app-template/template/src/api/homepage/content-types/homepage/schema.json`
-
-## API Customisations
-
-### Database
-
-Found at `template/src/api/database`
-
-#### Usage
-
-```ts
-import { test } from '@playwright/test';
-
-test.beforeEach(async ({ page }) => {
-  await page.request.fetch('http://localhost:1337/api/database/dump', {
-    method: 'POST',
-  });
-});
+```json
+{
+  // ...
+  "attributes": {
+    "name": {
+      "type": "string"
+    },
+    "profile": {
+      "allowedTypes": ["images", "files", "videos", "audios"],
+      "type": "media",
+      "multiple": false
+    },
+    "articles": {
+      "type": "relation",
+      "relation": "manyToMany",
+      "target": "api::article.article",
+      "mappedBy": "authors"
+    }
+  }
+  // ...
+}
 ```
 
-This endpoint does not have a `body`.
+### Homepage (Single Type)
 
-#### What does it do?
+```json
+{
+  // ...
+  "attributes": {
+    "title": {
+      "type": "string"
+    },
+    "content": {
+      "type": "blocks"
+    },
+    "admin_user": {
+      "type": "relation",
+      "relation": "oneToOne",
+      "target": "admin::user"
+    },
+    "seo": {
+      "type": "component",
+      "repeatable": false,
+      "component": "meta.seo"
+    }
+  }
+  // ...
+}
+```
 
-This endpoint `DELETES` every row from every table _excluding_ the "core" tables – normally prefixed with `strapi_`.
+### Product
 
-#### Why do we have it?
+This collection type is internationalized.
 
-This lets us wipe the entire test instance _if_ we need to. DTS does technically
-do this already for us. But nonetheless, its useful.
+```json
+{
+  // ...
+  "attributes": {
+    "name": {
+      "pluginOptions": {
+        "i18n": {
+          "localized": true
+        }
+      },
+      "type": "string",
+      "required": true
+    },
+    "slug": {
+      "pluginOptions": {
+        "i18n": {
+          "localized": true
+        }
+      },
+      "type": "uid",
+      "targetField": "name",
+      "required": true
+    },
+    "isAvailable": {
+      "pluginOptions": {
+        "i18n": {
+          "localized": false
+        }
+      },
+      "type": "boolean",
+      "default": true,
+      "required": true
+    },
+    "description": {
+      "pluginOptions": {
+        "i18n": {
+          "localized": true
+        }
+      },
+      "type": "blocks"
+    },
+    "images": {
+      "type": "media",
+      "multiple": true,
+      "required": false,
+      "allowedTypes": ["images", "files", "videos", "audios"],
+      "pluginOptions": {
+        "i18n": {
+          "localized": false
+        }
+      }
+    },
+    "seo": {
+      "type": "component",
+      "repeatable": false,
+      "pluginOptions": {
+        "i18n": {
+          "localized": true
+        }
+      },
+      "component": "meta.seo"
+    },
+    "sku": {
+      "pluginOptions": {
+        "i18n": {
+          "localized": true
+        }
+      },
+      "type": "integer",
+      "unique": true
+    },
+    "variations": {
+      "type": "component",
+      "repeatable": true,
+      "pluginOptions": {
+        "i18n": {
+          "localized": true
+        }
+      },
+      "component": "product.variations"
+    }
+  }
+  // ...
+}
+```
+
+### Match
+
+```json
+{
+  // ...
+  "attributes": {
+    "date": {
+      "type": "date"
+    },
+    "kit_man": {
+      "type": "string"
+    },
+    "opponent": {
+      "type": "string",
+      "required": true,
+      "regex": "^(?!.*richmond).*"
+    },
+    "lineup": {
+      "type": "component",
+      "repeatable": true,
+      "component": "match.player"
+    },
+    "most_valuable_player": {
+      "type": "component",
+      "repeatable": false,
+      "component": "match.player"
+    },
+    "sections": {
+      "type": "dynamiczone",
+      "components": ["match.player", "product.variations"]
+    }
+  }
+  // ...
+}
+```
+
+### Shop (Single Type)
+
+This single type is internationalized.
+
+```json
+{
+  // ...
+  "attributes": {
+    "title": {
+      "pluginOptions": {
+        "i18n": {
+          "localized": true
+        }
+      },
+      "type": "string",
+      "required": true
+    },
+    "content": {
+      "pluginOptions": {
+        "i18n": {
+          "localized": true
+        }
+      },
+      "type": "dynamiczone",
+      "components": [
+        "page-blocks.product-carousel",
+        "page-blocks.hero-image",
+        "page-blocks.content-and-image"
+      ],
+      "required": true,
+      "min": 2
+    },
+    "seo": {
+      "type": "component",
+      "repeatable": false,
+      "pluginOptions": {
+        "i18n": {
+          "localized": true
+        }
+      },
+      "component": "meta.seo"
+    }
+  }
+  // ...
+}
+```
+
+### Upcoming Match (Single Type)
+
+```json
+{
+  // ...
+  "attributes": {
+    "title": {
+      "type": "string"
+    },
+    "number_of_upcoming_matches": {
+      "type": "integer"
+    },
+    "next_match": {
+      "type": "date"
+    }
+  }
+  // ...
+}
+```
+
+## API Customisations
 
 ### Config
 

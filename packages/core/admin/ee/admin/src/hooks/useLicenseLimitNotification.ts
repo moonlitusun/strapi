@@ -5,26 +5,26 @@
  */
 import * as React from 'react';
 
-import { NotificationConfig, useNotification } from '@strapi/helper-plugin';
 import isNil from 'lodash/isNil';
 import { useIntl } from 'react-intl';
 import { useLocation } from 'react-router-dom';
+
+import { NotificationConfig, useNotification } from '../../../../admin/src/features/Notifications';
 
 import { useLicenseLimits } from './useLicenseLimits';
 
 const STORAGE_KEY_PREFIX = 'strapi-notification-seat-limit';
 
-const BILLING_STRAPI_CLOUD_URL = 'https://cloud.strapi.io/profile/billing';
 const BILLING_SELF_HOSTED_URL = 'https://strapi.io/billing/request-seats';
+const MANAGE_SEATS_URL = 'https://strapi.io/billing/manage-seats';
 
 export const useLicenseLimitNotification = () => {
   const { formatMessage } = useIntl();
   const { license, isError, isLoading } = useLicenseLimits();
-  const toggleNotification = useNotification();
+  const { toggleNotification } = useNotification();
   const { pathname } = useLocation();
 
-  const { enforcementUserCount, permittedSeats, licenseLimitStatus, isHostedOnStrapiCloud } =
-    license ?? {};
+  const { enforcementUserCount, permittedSeats, licenseLimitStatus, type } = license ?? {};
 
   React.useEffect(() => {
     if (isError || isLoading) {
@@ -34,14 +34,12 @@ export const useLicenseLimitNotification = () => {
     const shouldDisplayNotification =
       !isNil(permittedSeats) &&
       !window.sessionStorage.getItem(`${STORAGE_KEY_PREFIX}-${pathname}`) &&
-      (licenseLimitStatus === 'AT_LIMIT' || licenseLimitStatus === 'OVER_LIMIT');
+      licenseLimitStatus === 'OVER_LIMIT';
 
     let notificationType: NotificationConfig['type'];
 
     if (licenseLimitStatus === 'OVER_LIMIT') {
-      notificationType = 'warning';
-    } else if (licenseLimitStatus === 'AT_LIMIT') {
-      notificationType = 'softWarning';
+      notificationType = 'danger';
     }
 
     if (shouldDisplayNotification) {
@@ -68,15 +66,11 @@ export const useLicenseLimitNotification = () => {
           }
         ),
         link: {
-          url: isHostedOnStrapiCloud ? BILLING_STRAPI_CLOUD_URL : BILLING_SELF_HOSTED_URL,
-          label: formatMessage(
-            {
-              id: 'notification.ee.warning.seat-limit.link',
-              defaultMessage:
-                '{isHostedOnStrapiCloud, select, true {ADD SEATS} other {CONTACT SALES}}',
-            },
-            { isHostedOnStrapiCloud }
-          ),
+          url: type === 'gold' ? BILLING_SELF_HOSTED_URL : MANAGE_SEATS_URL,
+          label: formatMessage({
+            id: 'notification.ee.warning.seat-limit.link',
+            defaultMessage: type === 'gold' ? 'Contact sales' : 'Manage seats',
+          }),
         },
         blockTransition: true,
         onClose() {
@@ -93,7 +87,7 @@ export const useLicenseLimitNotification = () => {
     permittedSeats,
     licenseLimitStatus,
     enforcementUserCount,
-    isHostedOnStrapiCloud,
     isError,
+    type,
   ]);
 };

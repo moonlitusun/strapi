@@ -3,7 +3,6 @@ import {
   compact,
   difference,
   differenceWith,
-  flow,
   has,
   isArray,
   isEmpty,
@@ -17,21 +16,21 @@ import {
   isString,
   isUndefined,
   map,
-  mergeWith,
-  omit,
   pick,
   uniqBy,
   uniqWith,
 } from 'lodash/fp';
 
-import { mapAsync } from '@strapi/utils';
 import * as types from '../utils/types';
 import { createField } from '../fields';
 import { createQueryBuilder } from '../query';
 import { createRepository } from './entity-repository';
-import { deleteRelatedMorphOneRelationsAfterMorphToManyUpdate } from './morph-relations';
 import {
-  isPolymorphic,
+  deleteRelatedMorphOneRelationsAfterMorphToManyUpdate,
+  encodePolymorphicRelation,
+  encodePolymorphicId,
+} from './morph-relations';
+import {
   isBidirectional,
   isAnyToOne,
   isOneToAny,
@@ -45,11 +44,6 @@ import {
   cleanOrderColumns,
 } from './regular-relations';
 import { relationsOrderer } from './relations-orderer';
-import {
-  replaceRegularRelations,
-  cloneRegularRelations,
-} from './relations/cloning/regular-relations';
-import { DatabaseError } from '../errors';
 import type { Database } from '..';
 import type { Meta } from '../metadata';
 import type { ID } from '../types';
@@ -69,7 +63,7 @@ const toId = (value: unknown | { id: unknown }): ID => {
     return value;
   }
 
-  throw new Error(`Invalid id, expected a string or integer, got ${value}`);
+  throw new Error(`Invalid id, expected a string or integer, got ${JSON.stringify(value)}`);
 };
 const toIds = (value: unknown): ID[] => castArray(value || []).map(toId);
 
@@ -116,6 +110,7 @@ type Assocs =
         id: ScalarAssoc;
         position?: { start?: boolean; end?: boolean; before?: ID; after?: ID };
         __pivot?: any;
+        __type?: any;
       }> | null;
       disconnect?: Array<ScalarAssoc> | null;
     };
@@ -147,6 +142,7 @@ const toAssocs = (data: Assocs) => {
       id: elm.id,
       position: elm.position ? elm.position : { end: true },
       __pivot: elm.__pivot ?? {},
+      __type: elm.__type,
     })),
     disconnect: toIdArray(data?.disconnect),
   };
@@ -201,8 +197,10 @@ const processData = (
           ? data[attributeName]
           : data[joinColumnName];
 
-        if (!isUndefined(attrValue)) {
+        if (isNull(attrValue)) {
           obj[joinColumnName] = attrValue;
+        } else if (!isUndefined(attrValue)) {
+          obj[joinColumnName] = toId(attrValue);
         }
 
         continue;
@@ -317,6 +315,7 @@ export const createEntityManager = (db: Database): EntityManager => {
         where: { id },
         select: params.select,
         populate: params.populate,
+        filters: params.filters,
       });
 
       await db.lifecycles.run('afterCreate', uid, { params, result }, states);
@@ -404,6 +403,7 @@ export const createEntityManager = (db: Database): EntityManager => {
         where: { id },
         select: params.select,
         populate: params.populate,
+        filters: params.filters,
       });
 
       await db.lifecycles.run('afterUpdate', uid, { params, result }, states);
@@ -432,70 +432,6 @@ export const createEntityManager = (db: Database): EntityManager => {
       const result = { count: updatedRows };
 
       await db.lifecycles.run('afterUpdateMany', uid, { params, result }, states);
-
-      return result;
-    },
-
-    async clone(uid, cloneId, params = {}) {
-      const states = await db.lifecycles.run('beforeCreate', uid, { params });
-
-      const metadata = db.metadata.get(uid);
-      const { data } = params;
-
-      if (!isNil(data) && !isPlainObject(data)) {
-        throw new Error('Create expects a data object');
-      }
-
-      // TODO: Handle join columns?
-      const entity = await this.findOne(uid, { where: { id: cloneId } });
-
-      const dataToInsert = flow(
-        // Omit unwanted properties
-        omit(['id', 'created_at', 'updated_at']),
-        // Merge with provided data, set attribute to null if data attribute is null
-        mergeWith(data || {}, (original: unknown, override: unknown) =>
-          override === null ? override : original
-        ),
-        // Process data with metadata
-        (entity: Record<string, unknown>) => processData(metadata, entity, { withDefaults: true })
-      )(entity);
-
-      const res = await this.createQueryBuilder(uid)
-        .insert(dataToInsert)
-        .execute<Array<ID | { id: ID }>>();
-
-      const id = isRecord(res[0]) ? res[0].id : res[0];
-
-      const trx = await strapi.db.transaction();
-      try {
-        const cloneAttrs = Object.entries(metadata.attributes).reduce((acc, [attrName, attr]) => {
-          // TODO: handle components in the db layer
-          if (
-            types.isRelationalAttribute(attr) &&
-            'joinTable' in attr &&
-            attr.joinTable &&
-            !('component' in attr)
-          ) {
-            acc.push(attrName);
-          }
-          return acc;
-        }, [] as string[]);
-
-        await this.cloneRelations(uid, id, cloneId, data, { cloneAttrs, transaction: trx.get() });
-        await trx.commit();
-      } catch (e) {
-        await trx.rollback();
-        await this.createQueryBuilder(uid).where({ id }).delete().execute();
-        throw e;
-      }
-
-      const result = await this.findOne(uid, {
-        where: { id },
-        select: params.select,
-        populate: params.populate,
-      });
-
-      await db.lifecycles.run('afterCreate', uid, { params, result }, states);
 
       return result;
     },
@@ -548,7 +484,7 @@ export const createEntityManager = (db: Database): EntityManager => {
       const deletedRows = await this.createQueryBuilder(uid)
         .where(where)
         .delete()
-        .execute<number>();
+        .execute<number>({ mapResults: false });
 
       const result = { count: deletedRows };
 
@@ -576,6 +512,9 @@ export const createEntityManager = (db: Database): EntityManager => {
         const cleanRelationData = toAssocs(data[attributeName]);
 
         if (attribute.relation === 'morphOne' || attribute.relation === 'morphMany') {
+          /**
+           * morphOne and morphMany relations
+           */
           const { target, morphBy } = attribute;
 
           const targetAttribute = db.metadata.get(target).attributes[morphBy];
@@ -624,27 +563,57 @@ export const createEntityManager = (db: Database): EntityManager => {
 
           continue;
         } else if (attribute.relation === 'morphToOne') {
+          /**
+           * morphToOne
+           */
           // handled on the entry itself
           continue;
         } else if (attribute.relation === 'morphToMany') {
+          /**
+           * morphToMany
+           */
           const { joinTable } = attribute;
           const { joinColumn, morphColumn } = joinTable;
 
           const { idColumn, typeColumn, typeField = '__type' } = morphColumn;
 
-          if (isEmpty(cleanRelationData.set)) {
+          if (isEmpty(cleanRelationData.set) && isEmpty(cleanRelationData.connect)) {
             continue;
           }
 
-          const rows =
-            cleanRelationData.set?.map((data, idx) => ({
-              [joinColumn.name]: id,
-              [idColumn.name]: data.id,
-              [typeColumn.name]: data[typeField],
-              ...(('on' in joinTable && joinTable.on) || {}),
-              ...(data.__pivot || {}),
-              order: idx + 1,
-            })) ?? [];
+          // set happens before connect/disconnect
+          const dataset = cleanRelationData.set || cleanRelationData.connect || [];
+
+          const rows = dataset.map((data, idx) => ({
+            [joinColumn.name]: id,
+            [idColumn.name]: data.id,
+            [typeColumn.name]: data[typeField as '__type'],
+            ...(('on' in joinTable && joinTable.on) || {}),
+            ...(data.__pivot || {}),
+            order: idx + 1,
+          })) satisfies Record<string, any>[];
+
+          const orderMap = relationsOrderer(
+            [],
+            morphColumn.idColumn.name,
+            'order',
+            true // Always make a strict connect when inserting
+          )
+            .connect(
+              // Merge id & __type to get a single id key
+              dataset.map(encodePolymorphicRelation({ idColumn: 'id', typeColumn: typeField }))
+            )
+            .get()
+            // set the order based on the order of the ids
+            .reduce((acc, rel, idx) => ({ ...acc, [rel.id]: idx + 1 }), {} as Record<ID, number>);
+
+          rows.forEach((row: Record<string, unknown>) => {
+            const rowId = row[morphColumn.idColumn.name] as ID;
+            const rowType = row[morphColumn.typeColumn.name] as string;
+            const encodedId = encodePolymorphicId(rowId, rowType);
+
+            row.order = orderMap[encodedId];
+          });
 
           // delete previous relations
           await deleteRelatedMorphOneRelationsAfterMorphToManyUpdate(rows as any, {
@@ -727,7 +696,7 @@ export const createEntityManager = (db: Database): EntityManager => {
               ...(('on' in joinTable && joinTable.on) || {}),
               ...(data.__pivot || {}),
             };
-          }) as Record<string, any>[];
+          }) satisfies Record<string, any>[];
 
           // add order value
           if (cleanRelationData.set && hasOrderColumn(attribute)) {
@@ -834,6 +803,75 @@ export const createEntityManager = (db: Database): EntityManager => {
 
             const { idColumn, typeColumn } = morphColumn;
 
+            const hasSet = !isEmpty(cleanRelationData.set);
+            const hasConnect = !isEmpty(cleanRelationData.connect);
+            const hasDisconnect = !isEmpty(cleanRelationData.disconnect);
+
+            // for connect/disconnect without a set, only modify those relations
+            if (!hasSet && (hasConnect || hasDisconnect)) {
+              // delete disconnects and connects (to prevent duplicates when we add them later)
+              const idsToDelete = [
+                ...(cleanRelationData.disconnect || []),
+                ...(cleanRelationData.connect || []),
+              ];
+
+              if (!isEmpty(idsToDelete)) {
+                const where = {
+                  $or: idsToDelete.map((item: any) => {
+                    return {
+                      [idColumn.name]: id,
+                      [typeColumn.name]: uid,
+                      [joinColumn.name]: item.id,
+                      ...(joinTable.on || {}),
+                      field: attributeName,
+                    };
+                  }),
+                };
+
+                await this.createQueryBuilder(joinTable.name)
+                  .delete()
+                  .where(where)
+                  .transacting(trx)
+                  .execute();
+              }
+
+              // connect relations
+              if (hasConnect) {
+                // Query database to find the order of the last relation
+                const start = await this.createQueryBuilder(joinTable.name)
+                  .where({
+                    [idColumn.name]: id,
+                    [typeColumn.name]: uid,
+                    ...(joinTable.on || {}),
+                    ...(data.__pivot || {}),
+                  })
+                  .max('order')
+                  .first()
+                  .transacting(trx)
+                  .execute();
+
+                const startOrder = (start as any)?.max || 0;
+
+                const rows = (cleanRelationData.connect ?? []).map((data, idx) => ({
+                  [joinColumn.name]: data.id,
+                  [idColumn.name]: id,
+                  [typeColumn.name]: uid,
+                  ...(joinTable.on || {}),
+                  ...(data.__pivot || {}),
+                  order: startOrder + idx + 1,
+                  field: attributeName,
+                })) satisfies Record<string, any>[];
+
+                await this.createQueryBuilder(joinTable.name)
+                  .insert(rows)
+                  .transacting(trx)
+                  .execute();
+              }
+
+              continue;
+            }
+
+            // delete all relations
             await this.createQueryBuilder(joinTable.name)
               .delete()
               .where({
@@ -845,21 +883,19 @@ export const createEntityManager = (db: Database): EntityManager => {
               .transacting(trx)
               .execute();
 
-            if (isEmpty(cleanRelationData.set)) {
-              continue;
+            if (hasSet) {
+              const rows = (cleanRelationData.set ?? []).map((data, idx) => ({
+                [joinColumn.name]: data.id,
+                [idColumn.name]: id,
+                [typeColumn.name]: uid,
+                ...(joinTable.on || {}),
+                ...(data.__pivot || {}),
+                order: idx + 1,
+                field: attributeName,
+              })) satisfies Record<string, any>[];
+
+              await this.createQueryBuilder(joinTable.name).insert(rows).transacting(trx).execute();
             }
-
-            const rows = cleanRelationData.set?.map((data, idx) => ({
-              [joinColumn.name]: data.id,
-              [idColumn.name]: id,
-              [typeColumn.name]: uid,
-              ...(joinTable.on || {}),
-              ...(data.__pivot || {}),
-              order: idx + 1,
-              field: attributeName,
-            })) as Record<string, any>;
-
-            await this.createQueryBuilder(joinTable.name).insert(rows).transacting(trx).execute();
           }
 
           continue;
@@ -876,38 +912,170 @@ export const createEntityManager = (db: Database): EntityManager => {
 
           const { idColumn, typeColumn, typeField = '__type' } = morphColumn;
 
-          await this.createQueryBuilder(joinTable.name)
-            .delete()
-            .where({
-              [joinColumn.name]: id,
-              ...(joinTable.on || {}),
-            })
-            .transacting(trx)
-            .execute();
+          const hasSet = !isEmpty(cleanRelationData.set);
+          const hasConnect = !isEmpty(cleanRelationData.connect);
+          const hasDisconnect = !isEmpty(cleanRelationData.disconnect);
 
-          if (isEmpty(cleanRelationData.set)) {
+          // for connect/disconnect without a set, only modify those relations
+          if (!hasSet && (hasConnect || hasDisconnect)) {
+            // delete disconnects and connects (to prevent duplicates when we add them later)
+            const idsToDelete = [
+              ...(cleanRelationData.disconnect || []),
+              ...(cleanRelationData.connect || []),
+            ];
+
+            const rowsToDelete = [
+              ...(cleanRelationData.disconnect ?? []).map((data, idx) => ({
+                [joinColumn.name]: id,
+                [idColumn.name]: data.id,
+                [typeColumn.name]: data[typeField],
+                ...(('on' in joinTable && joinTable.on) || {}),
+                ...(data.__pivot || {}),
+                order: idx + 1,
+              })),
+              ...(cleanRelationData.connect ?? []).map((data, idx) => ({
+                [joinColumn.name]: id,
+                [idColumn.name]: data.id,
+                // @ts-expect-error TODO
+                [typeColumn.name]: data[typeField],
+                ...(('on' in joinTable && joinTable.on) || {}),
+                ...(data.__pivot || {}),
+                order: idx + 1,
+              })),
+            ];
+
+            const adjacentRelations = await this.createQueryBuilder(joinTable.name)
+              .where({
+                $or: [
+                  {
+                    [joinColumn.name]: id,
+                    [idColumn.name]: {
+                      $in: compact(
+                        cleanRelationData.connect?.map(
+                          (r) => r.position?.after || r.position?.before
+                        )
+                      ),
+                    },
+                  },
+                  {
+                    [joinColumn.name]: id,
+                    order: this.createQueryBuilder(joinTable.name)
+                      .max('order')
+                      .where({ [joinColumn.name]: id })
+                      .where(joinTable.on || {})
+                      .transacting(trx)
+                      .getKnexQuery(),
+                  },
+                ],
+              })
+              .where(joinTable.on || {})
+              .transacting(trx)
+              .execute<Array<Record<string, any>>>();
+
+            if (!isEmpty(idsToDelete)) {
+              const where = {
+                $or: idsToDelete.map((item: any) => {
+                  return {
+                    [idColumn.name]: item.id,
+                    [typeColumn.name]: item[typeField],
+                    [joinColumn.name]: id,
+                    ...(joinTable.on || {}),
+                  };
+                }),
+              };
+
+              // delete previous relations
+              await this.createQueryBuilder(joinTable.name)
+                .delete()
+                .where(where)
+                .transacting(trx)
+                .execute();
+
+              await deleteRelatedMorphOneRelationsAfterMorphToManyUpdate(rowsToDelete as any, {
+                uid,
+                attributeName,
+                joinTable,
+                db,
+                transaction: trx,
+              });
+            }
+
+            // connect relations
+            if (hasConnect) {
+              const dataset = cleanRelationData.connect || [];
+
+              const rows = dataset.map((data) => ({
+                [joinColumn.name]: id,
+                [idColumn.name]: data.id,
+                [typeColumn.name]: data[typeField as '__type'],
+                ...(joinTable.on || {}),
+                ...(data.__pivot || {}),
+                field: attributeName,
+              })) satisfies Record<string, any>[];
+
+              const orderMap = relationsOrderer(
+                // Merge id & __type to get a single id key
+                adjacentRelations.map(
+                  encodePolymorphicRelation({
+                    idColumn: idColumn.name,
+                    typeColumn: typeColumn.name,
+                  })
+                ),
+                idColumn.name,
+                'order',
+                cleanRelationData.options?.strict
+              )
+                .connect(
+                  // Merge id & __type to get a single id key
+                  dataset.map(encodePolymorphicRelation({ idColumn: 'id', typeColumn: '__type' }))
+                )
+                .getOrderMap();
+
+              rows.forEach((row: Record<string, unknown>) => {
+                const rowId = row[idColumn.name] as number;
+                const rowType = row[typeColumn.name] as string;
+                const encodedId = encodePolymorphicId(rowId, rowType);
+
+                row.order = orderMap[encodedId];
+              });
+
+              await this.createQueryBuilder(joinTable.name).insert(rows).transacting(trx).execute();
+            }
+
             continue;
           }
 
-          const rows = (cleanRelationData.set ?? []).map((data, idx) => ({
-            [joinColumn.name]: id,
-            [idColumn.name]: data.id,
-            [typeColumn.name]: data[typeField],
-            ...(joinTable.on || {}),
-            ...(data.__pivot || {}),
-            order: idx + 1,
-          })) as Record<string, any>[];
+          if (hasSet) {
+            // delete all relations for this entity
+            await this.createQueryBuilder(joinTable.name)
+              .delete()
+              .where({
+                [joinColumn.name]: id,
+                ...(joinTable.on || {}),
+              })
+              .transacting(trx)
+              .execute();
 
-          // delete previous relations
-          await deleteRelatedMorphOneRelationsAfterMorphToManyUpdate(rows, {
-            uid,
-            attributeName,
-            joinTable,
-            db,
-            transaction: trx,
-          });
+            const rows = (cleanRelationData.set ?? []).map((data, idx) => ({
+              [joinColumn.name]: id,
+              [idColumn.name]: data.id,
+              [typeColumn.name]: data[typeField],
+              field: attributeName,
+              ...(joinTable.on || {}),
+              ...(data.__pivot || {}),
+              order: idx + 1,
+            })) satisfies Record<string, any>[];
 
-          await this.createQueryBuilder(joinTable.name).insert(rows).transacting(trx).execute();
+            await deleteRelatedMorphOneRelationsAfterMorphToManyUpdate(rows, {
+              uid,
+              attributeName,
+              joinTable,
+              db,
+              transaction: trx,
+            });
+
+            await this.createQueryBuilder(joinTable.name).insert(rows).transacting(trx).execute();
+          }
 
           continue;
         }
@@ -960,7 +1128,8 @@ export const createEntityManager = (db: Database): EntityManager => {
 
             if (isPartialUpdate) {
               if (isAnyToOne(attribute)) {
-                cleanRelationData.connect = cleanRelationData.connect?.slice(-1);
+                // TODO: V5 find a fix to connect multiple versions of a document at the same time on xToOne relations
+                // cleanRelationData.connect = cleanRelationData.connect?.slice(-1);
               }
               relIdsToaddOrMove = toIds(cleanRelationData.connect);
               const relIdsToDelete = toIds(
@@ -1321,74 +1490,6 @@ export const createEntityManager = (db: Database): EntityManager => {
       }
     },
 
-    // TODO: Clone polymorphic relations
-    /**
-     *
-     * @param {string} uid - uid of the entity to clone
-     * @param {number} targetId - id of the entity to clone into
-     * @param {number} sourceId - id of the entity to clone from
-     * @param {object} opt
-     * @param {object} opt.cloneAttrs - key value pair of attributes to clone
-     * @param {object} opt.transaction - transaction to use
-     * @example cloneRelations('user', 3, 1, { cloneAttrs: ["comments"]})
-     * @example cloneRelations('post', 5, 2, { cloneAttrs: ["comments", "likes"] })
-     */
-    async cloneRelations(uid, targetId, sourceId, data, options) {
-      const { attributes } = db.metadata.get(uid);
-      const { cloneAttrs = [], transaction } = options ?? {};
-
-      if (!attributes) {
-        return;
-      }
-
-      await mapAsync(cloneAttrs, async (attrName: string) => {
-        const attribute = attributes[attrName];
-
-        if (attribute.type !== 'relation') {
-          throw new DatabaseError(
-            `Attribute ${attrName} is not a relation attribute. Cloning relations is only supported for relation attributes.`
-          );
-        }
-
-        if (isPolymorphic(attribute)) {
-          // TODO: add support for cloning polymorphic relations
-          return;
-        }
-
-        if ('joinColumn' in attribute) {
-          // TODO: add support for cloning oneToMany relations on the owning side
-          return;
-        }
-
-        if (!attribute.joinTable) {
-          return;
-        }
-
-        let omitIds: ID[] = [];
-        if (has(attrName, data)) {
-          const cleanRelationData = toAssocs(data[attrName]);
-
-          // Don't clone if the relation attr is being set
-          if (cleanRelationData.set) {
-            return;
-          }
-
-          // Disconnected relations don't need to be cloned
-          if (cleanRelationData.disconnect) {
-            omitIds = toIds(cleanRelationData.disconnect);
-          }
-        }
-
-        if (isOneToAny(attribute) && isBidirectional(attribute)) {
-          await replaceRegularRelations({ targetId, sourceId, attribute, omitIds, transaction });
-        } else {
-          await cloneRegularRelations({ targetId, sourceId, attribute, transaction });
-        }
-      });
-
-      await this.updateRelations(uid, targetId, data, { transaction });
-    },
-
     // TODO: add lifecycle events
     async populate(uid, entity, populate) {
       const entry = await this.findOne(uid, {
@@ -1416,10 +1517,13 @@ export const createEntityManager = (db: Database): EntityManager => {
       const entry = await this.findOne(uid, {
         select: ['id'],
         where: { id: entity.id },
-        populate: fieldsArr.reduce((acc, field) => {
-          acc[field] = populate || true;
-          return acc;
-        }, {} as Record<string, unknown>),
+        populate: fieldsArr.reduce(
+          (acc, field) => {
+            acc[field] = populate || true;
+            return acc;
+          },
+          {} as Record<string, unknown>
+        ),
       });
 
       if (!entry) {

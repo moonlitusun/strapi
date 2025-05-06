@@ -1,6 +1,6 @@
 {
   "name": "@strapi/plugin-color-picker",
-  "version": "4.20.4",
+  "version": "5.12.7",
   "description": "Strapi maintained Custom Fields",
   "repository": {
     "type": "git",
@@ -38,11 +38,15 @@
     "./package.json": "./package.json"
   },
   "files": [
-    "./dist",
+    "dist/",
     "strapi-server.js"
   ],
   "scripts": {
-    "build": "strapi plugin:build --force",
+    "build": "run -T npm-run-all clean --parallel build:code build:types",
+    "build:code": "run -T rollup -c",
+    "build:types": "run -T run-p build:types:server build:types:admin",
+    "build:types:server": "run -T tsc -p server/tsconfig.build.json --emitDeclarationOnly",
+    "build:types:admin": "run -T tsc -p admin/tsconfig.build.json --emitDeclarationOnly",
     "clean": "run -T rimraf ./dist",
     "lint": "run -T eslint .",
     "test:front": "run -T cross-env IS_EE=true jest --config ./jest.config.front.js",
@@ -50,36 +54,33 @@
     "test:front:watch": "run -T cross-env IS_EE=true jest --config ./jest.config.front.js --watchAll",
     "test:front:watch:ce": "run -T cross-env IS_EE=false jest --config ./jest.config.front.js --watchAll",
     "test:ts:front": "run -T tsc -p admin/tsconfig.json",
-    "watch": "strapi plugin:watch"
+    "watch": "run -T rollup -c -w"
   },
   "dependencies": {
-    "@strapi/design-system": "1.15.0",
-    "@strapi/helper-plugin": "4.20.4",
-    "@strapi/icons": "1.15.0",
-    "prop-types": "^15.8.1",
+    "@strapi/design-system": "2.0.0-rc.23",
+    "@strapi/icons": "2.0.0-rc.23",
     "react-colorful": "5.6.1",
-    "react-intl": "6.4.1"
+    "react-intl": "6.6.2"
   },
   "devDependencies": {
-    "@strapi/strapi": "4.20.4",
-    "@testing-library/react": "14.0.0",
-    "@testing-library/user-event": "14.4.3",
-    "@types/styled-components": "5.1.32",
-    "react": "^18.2.0",
-    "react-dom": "^18.2.0",
-    "react-router-dom": "5.3.4",
-    "styled-components": "5.3.3",
-    "typescript": "5.2.2"
+    "@strapi/strapi": "5.12.7",
+    "@testing-library/react": "15.0.7",
+    "@testing-library/user-event": "14.5.2",
+    "react": "18.3.1",
+    "react-dom": "18.3.1",
+    "react-router-dom": "6.22.3",
+    "styled-components": "6.1.8",
+    "typescript": "5.4.4"
   },
   "peerDependencies": {
-    "@strapi/strapi": "^4.4.0",
+    "@strapi/strapi": "^5.0.0",
     "react": "^17.0.0 || ^18.0.0",
     "react-dom": "^17.0.0 || ^18.0.0",
-    "react-router-dom": "^5.2.0",
-    "styled-components": "^5.2.1"
+    "react-router-dom": "^6.0.0",
+    "styled-components": "^6.0.0"
   },
   "engines": {
-    "node": ">=18.0.0 <=20.x.x",
+    "node": ">=18.0.0 <=22.x.x",
     "npm": ">=6.0.0"
   },
   "strapi": {

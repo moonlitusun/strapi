@@ -23,6 +23,11 @@ export const username = yup.string().min(1);
 export const password = yup
   .string()
   .min(8)
+  .test('required-byte-size', '${path} must be less than 73 bytes', function (value) {
+    if (!value) return true;
+    const byteSize = new TextEncoder().encode(value).length;
+    return byteSize <= 72;
+  })
   .matches(/[a-z]/, '${path} must contain at least one lowercase character')
   .matches(/[A-Z]/, '${path} must contain at least one uppercase character')
   .matches(/\d/, '${path} must contain at least one number');
@@ -41,7 +46,7 @@ export const arrayOfConditionNames = yup
   .array()
   .of(yup.string())
   .test('is-an-array-of-conditions', 'is not a plugin name', function (value) {
-    const ids = strapi.admin.services.permission.conditionProvider.keys();
+    const ids = strapi.service('admin::permission').conditionProvider.keys();
     return _.isUndefined(value) || _.difference(value, ids).length === 0
       ? true
       : this.createError({ path: this.path, message: `contains conditions that don't exist` });
@@ -118,7 +123,7 @@ export const permission = yup
           return isNil(subject);
         }
 
-        if (isArray(action.subjects)) {
+        if (isArray(action.subjects) && !isNil(subject)) {
           return action.subjects.includes(subject);
         }
 

@@ -1,12 +1,13 @@
-import { Box, Button, ContentLayout, Flex, HeaderLayout } from '@strapi/design-system';
-import { Link, useTracking } from '@strapi/helper-plugin';
-import { ArrowLeft, Check, Pencil, Plus } from '@strapi/icons';
+import { BackButton, useTracking, Layouts } from '@strapi/admin/strapi-admin';
+import { Box, Button, Flex } from '@strapi/design-system';
+import { Check, Pencil, Plus } from '@strapi/icons';
 import get from 'lodash/get';
 import has from 'lodash/has';
 import isEqual from 'lodash/isEqual';
 import upperFirst from 'lodash/upperFirst';
 import { useIntl } from 'react-intl';
-import { Prompt, useRouteMatch } from 'react-router-dom';
+import { unstable_usePrompt as usePrompt, useMatch } from 'react-router-dom';
+import { styled } from 'styled-components';
 
 import { List } from '../../components/List';
 import { ListRow } from '../../components/ListRow';
@@ -17,7 +18,9 @@ import { getTrad } from '../../utils/getTrad';
 
 import { LinkToCMSettingsView } from './LinkToCMSettingsView';
 
-/* eslint-disable indent */
+const LayoutsHeaderCustom = styled(Layouts.Header)`
+  overflow-wrap: anywhere;
+`;
 
 const ListView = () => {
   const { initialData, modifiedData, isInDevelopmentMode, isInContentTypeView, submitData } =
@@ -25,9 +28,7 @@ const ListView = () => {
   const { formatMessage } = useIntl();
   const { trackUsage } = useTracking();
 
-  const match = useRouteMatch<{ kind: string; currentUID: string }>(
-    '/plugins/content-type-builder/:kind/:currentUID'
-  );
+  const match = useMatch('/plugins/content-type-builder/:kind/:currentUID');
 
   const {
     onOpenModalAddComponentsToDZ,
@@ -112,85 +113,75 @@ const ListView = () => {
     });
   };
 
+  usePrompt({
+    when: hasModelBeenModified,
+    message: formatMessage({ id: getTrad('prompt.unsaved'), defaultMessage: 'Are you sure?' }),
+  });
+
+  const primaryAction = isInDevelopmentMode && (
+    <Flex gap={2} marginLeft={2}>
+      {/* DON'T display the add field button when the content type has not been created */}
+      {!isCreatingFirstContentType && (
+        <Button
+          startIcon={<Plus />}
+          variant="secondary"
+          minWidth="max-content"
+          onClick={() => {
+            onOpenModalAddField({ forTarget, targetUid });
+          }}
+        >
+          {formatMessage({
+            id: getTrad('button.attributes.add.another'),
+            defaultMessage: 'Add another field',
+          })}
+        </Button>
+      )}
+      <Button
+        startIcon={<Check />}
+        onClick={async () => await submitData()}
+        type="submit"
+        disabled={isEqual(modifiedData, initialData)}
+      >
+        {formatMessage({
+          id: 'global.save',
+          defaultMessage: 'Save',
+        })}
+      </Button>
+    </Flex>
+  );
+
+  const secondaryAction = isInDevelopmentMode && !isFromPlugin && !isCreatingFirstContentType && (
+    <Button startIcon={<Pencil />} variant="tertiary" onClick={onEdit}>
+      {formatMessage({
+        id: 'app.utils.edit',
+        defaultMessage: 'Edit',
+      })}
+    </Button>
+  );
+
   return (
     <>
-      <Prompt
-        message={(location) =>
-          location.hash === '#back' ? false : formatMessage({ id: getTrad('prompt.unsaved') })
-        }
-        when={hasModelBeenModified}
-      />
-      <HeaderLayout
+      <LayoutsHeaderCustom
         id="title"
-        primaryAction={
-          isInDevelopmentMode && (
-            <Flex gap={2}>
-              {/* DON'T display the add field button when the content type has not been created */}
-              {!isCreatingFirstContentType && (
-                <Button
-                  startIcon={<Plus />}
-                  variant="secondary"
-                  onClick={() => {
-                    onOpenModalAddField({ forTarget, targetUid });
-                  }}
-                >
-                  {formatMessage({
-                    id: getTrad('button.attributes.add.another'),
-                    defaultMessage: 'Add another field',
-                  })}
-                </Button>
-              )}
-              <Button
-                startIcon={<Check />}
-                onClick={() => submitData()}
-                type="submit"
-                disabled={isEqual(modifiedData, initialData)}
-              >
-                {formatMessage({
-                  id: 'global.save',
-                  defaultMessage: 'Save',
-                })}
-              </Button>
-            </Flex>
-          )
-        }
-        secondaryAction={
-          isInDevelopmentMode &&
-          !isFromPlugin &&
-          !isCreatingFirstContentType && (
-            <Button startIcon={<Pencil />} variant="tertiary" onClick={onEdit}>
-              {formatMessage({
-                id: 'app.utils.edit',
-                defaultMessage: 'Edit',
-              })}
-            </Button>
-          )
-        }
+        primaryAction={primaryAction}
+        secondaryAction={secondaryAction}
         title={upperFirst(label)}
         subtitle={formatMessage({
           id: getTrad('listView.headerLayout.description'),
           defaultMessage: 'Build the data architecture of your content',
         })}
-        navigationAction={
-          <Link startIcon={<ArrowLeft />} to="/plugins/content-type-builder/">
-            {formatMessage({
-              id: 'global.back',
-              defaultMessage: 'Back',
-            })}
-          </Link>
-        }
+        navigationAction={<BackButton />}
       />
-      <ContentLayout>
+      <Layouts.Content>
         <Flex direction="column" alignItems="stretch" gap={4}>
           <Flex justifyContent="flex-end">
             <Flex gap={2}>
               <LinkToCMSettingsView
                 key="link-to-cm-settings-view"
                 targetUid={targetUid}
-                isTemporary={isTemporary}
                 isInContentTypeView={isInContentTypeView}
                 contentTypeKind={contentTypeKind}
-                disabled={isCreatingFirstContentType}
+                disabled={isCreatingFirstContentType || isTemporary}
               />
             </Flex>
           </Flex>
@@ -205,7 +196,7 @@ const ListView = () => {
             />
           </Box>
         </Flex>
-      </ContentLayout>
+      </Layouts.Content>
     </>
   );
 };

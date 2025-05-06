@@ -8,6 +8,7 @@ interface Link {
   id: ID;
   position?: { before?: ID; after?: ID; start?: true; end?: true };
   order?: number;
+  __component?: string;
 }
 
 interface OrderedLink extends Link {
@@ -43,26 +44,47 @@ const sortConnectArray = (connectArr: Link[], initialArr: Link[] = [], strictSor
     {} as Record<ID, boolean>
   );
   // Map to store the first index where a relation id is connected
-  const mappedRelations = connectArr.reduce((mapper, relation: Link) => {
-    const adjacentRelId = relation.position?.before || relation.position?.after;
+  const mappedRelations = connectArr.reduce(
+    (mapper, relation: Link) => {
+      const adjacentRelId = relation.position?.before || relation.position?.after;
 
-    if (!adjacentRelId || (!relationInInitialArray[adjacentRelId] && !mapper[adjacentRelId])) {
-      needsSorting = true;
-    }
+      if (!adjacentRelId || (!relationInInitialArray[adjacentRelId] && !mapper[adjacentRelId])) {
+        needsSorting = true;
+      }
 
-    // If the relation is already in the array, throw an error
-    if (mapper[relation.id]) {
-      throw new InvalidRelationError(
-        `The relation with id ${relation.id} is already connected. ` +
-          'You cannot connect the same relation twice.'
-      );
-    }
+      /**
+       * We do not allow duplicate relations to be connected, so we need to check for uniqueness with components
+       * Note that the id here includes the uid for polymorphic relations
+       *
+       * So for normal relations, the same id means the same relation
+       * For component relations, it means the unique combo of (id, component name)
+       */
 
-    return {
-      [relation.id]: { ...relation, computed: false },
-      ...mapper,
-    };
-  }, {} as Record<ID, Link & { computed: boolean }>);
+      // Check if there's an existing relation with this id
+      const existingRelation = mapper[relation.id];
+
+      // Check if existing relation has a component or not
+      const hasNoComponent = existingRelation && !('__component' in existingRelation);
+
+      // Check if the existing relation has the same component as the new relation
+      const hasSameComponent =
+        existingRelation && existingRelation.__component === relation.__component;
+
+      // If we have an existing relation that is not unique (no component or same component) we won't accept it
+      if (existingRelation && (hasNoComponent || hasSameComponent)) {
+        throw new InvalidRelationError(
+          `The relation with id ${relation.id} is already connected. ` +
+            'You cannot connect the same relation twice.'
+        );
+      }
+
+      return {
+        [relation.id]: { ...relation, computed: false },
+        ...mapper,
+      };
+    },
+    {} as Record<ID, Link & { computed: boolean }>
+  );
 
   // If we don't need to sort the connect array, we can return it as is
   if (!needsSorting) return connectArr;
@@ -240,13 +262,16 @@ const relationsOrderer = <TRelation extends Record<string, ID | number | null>>(
     getOrderMap() {
       return _(computedRelations)
         .groupBy('order')
-        .reduce((acc, relations) => {
-          if (relations[0]?.init) return acc;
-          relations.forEach((relation, idx) => {
-            acc[relation.id] = Math.floor(relation.order) + (idx + 1) / (relations.length + 1);
-          });
-          return acc;
-        }, {} as Record<ID, number>);
+        .reduce(
+          (acc, relations) => {
+            if (relations[0]?.init) return acc;
+            relations.forEach((relation, idx) => {
+              acc[relation.id] = Math.floor(relation.order) + (idx + 1) / (relations.length + 1);
+            });
+            return acc;
+          },
+          {} as Record<ID, number>
+        );
     },
   };
 };

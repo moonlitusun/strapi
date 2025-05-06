@@ -1,5 +1,6 @@
 /* eslint-disable @typescript-eslint/no-loop-func */
 import { isNil, pick } from 'lodash/fp';
+
 import {
   AnyAttribute,
   Attribute,
@@ -14,9 +15,18 @@ export interface Path {
   attribute: string | null;
 }
 
-export interface TraverseOptions {
-  path?: Path;
+export interface Parent {
+  attribute?: Attribute;
+  key: string | null;
+  path: Path;
   schema: Model;
+}
+
+export interface TraverseOptions {
+  schema: Model;
+  path?: Path;
+  parent?: Parent;
+  getModel(uid: string): Model;
 }
 
 export interface VisitorOptions {
@@ -24,8 +34,10 @@ export interface VisitorOptions {
   value: unknown;
   schema: Model;
   key: string;
-  attribute: AnyAttribute;
+  attribute?: AnyAttribute;
   path: Path;
+  parent?: Parent;
+  getModel(uid: string): Model;
 }
 
 export type Traverse = (
@@ -51,7 +63,7 @@ interface Interceptor<T = unknown> {
 interface ParseUtils<T> {
   transform(data: T): unknown;
   remove(key: string, data: T): unknown;
-  set(key: string, valeu: unknown, data: T): unknown;
+  set(key: string, value: unknown, data: T): unknown;
   keys(data: T): string[];
   get(key: string, data: T): unknown;
 }
@@ -76,7 +88,7 @@ interface CommonHandler<AttributeType = Attribute> {
 
 export interface TransformUtils {
   remove(key: string): void;
-  set(key: string, valeu: unknown): void;
+  set(key: string, value: unknown): void;
   recurse: Traverse;
 }
 
@@ -88,7 +100,10 @@ interface Context<AttributeType = Attribute> {
   path: Path;
   data: unknown;
   visitor: Visitor;
+  parent?: Parent;
+  getModel(uid: string): Model;
 }
+
 interface State {
   parsers: Parser[];
   interceptors: Interceptor[];
@@ -99,7 +114,7 @@ interface State {
   };
 }
 
-const DEFAULT_PATH = { raw: null, attribute: null };
+const DEFAULT_PATH = { raw: null, attribute: null } satisfies Path;
 
 export default () => {
   const state: State = {
@@ -113,7 +128,7 @@ export default () => {
   };
 
   const traverse: Traverse = async (visitor, options, data) => {
-    const { path = DEFAULT_PATH, schema } = options ?? {};
+    const { path = DEFAULT_PATH, parent, schema, getModel } = options ?? {};
 
     // interceptors
     for (const { predicate, handler } of state.interceptors) {
@@ -136,11 +151,7 @@ export default () => {
     const keys = utils.keys(out);
 
     for (const key of keys) {
-      const attribute =
-        schema?.attributes?.[key] ??
-        // FIX: Needed to not break existing behavior on the API.
-        //      It looks for the attribute in the DB metadata when the key is in snake_case
-        schema?.attributes?.[strapi.db.metadata.get(schema?.uid).columnToAttribute[key]];
+      const attribute = schema?.attributes?.[key];
 
       const newPath = { ...path };
 
@@ -151,7 +162,6 @@ export default () => {
       }
 
       // visitors
-
       const visitorOptions: VisitorOptions = {
         key,
         value: utils.get(key, out),
@@ -159,6 +169,8 @@ export default () => {
         schema,
         path: newPath,
         data: out,
+        getModel,
+        parent,
       };
 
       const transformUtils: TransformUtils = {
@@ -183,6 +195,8 @@ export default () => {
         path: newPath,
         data: out,
         visitor,
+        getModel,
+        parent,
       });
 
       // ignore

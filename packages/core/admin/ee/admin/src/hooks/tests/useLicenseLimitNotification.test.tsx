@@ -13,7 +13,7 @@ const baseLicenseInfo = {
   shouldStopCreate: true,
   licenseLimitStatus: 'AT_LIMIT',
   isHostedOnStrapiCloud: false,
-  licenseType: 'gold',
+  type: 'growth',
 };
 
 // TODO: refactor
@@ -27,9 +27,12 @@ jest.mock('react-router', () => {
 
 const toggleNotification = jest.fn();
 
-jest.mock('@strapi/helper-plugin', () => {
+jest.mock('../../../../../admin/src/features/Notifications', () => {
   return {
-    useNotification: jest.fn(() => toggleNotification),
+    ...jest.requireActual('../../../../../admin/src/features/Notifications'),
+    useNotification: jest.fn(() => ({
+      toggleNotification,
+    })),
   };
 });
 
@@ -75,7 +78,7 @@ describe('useLicenseLimitNotification', () => {
     expect(toggleNotification).not.toHaveBeenCalled();
   });
 
-  it('should not display notification if status is not AT_LIMIT or OVER_LIMIT', () => {
+  it('should not display notification if status is not OVER_LIMIT', () => {
     // @ts-expect-error – mock
     useLicenseLimits.mockImplementationOnce(() => ({
       license: {
@@ -88,33 +91,12 @@ describe('useLicenseLimitNotification', () => {
     expect(toggleNotification).not.toHaveBeenCalled();
   });
 
-  it('should display a notification when license limit is over or at limit', () => {
-    setup();
-    expect(toggleNotification).toHaveBeenCalled();
-  });
-
-  it('should display a soft warning notification when license limit is at limit', () => {
-    setup();
-
-    expect(toggleNotification).toHaveBeenCalledWith({
-      type: 'softWarning',
-      message:
-        "Add seats to re-enable Users. If you already did it but it's not reflected in Strapi yet, make sure to restart your app.",
-      title: 'At seat limit (5/5)',
-      link: {
-        url: 'https://strapi.io/billing/request-seats',
-        label: 'CONTACT SALES',
-      },
-      blockTransition: true,
-      onClose: expect.any(Function),
-    });
-  });
-
-  it('should display a warning notification when license limit is at limit', () => {
+  it('should display a danger notification when license limit is over the limit', () => {
     // @ts-expect-error – mock
     useLicenseLimits.mockImplementationOnce(() => ({
       license: {
         ...baseLicenseInfo,
+        enforcementUserCount: 6,
         licenseLimitStatus: 'OVER_LIMIT',
       },
     }));
@@ -122,38 +104,39 @@ describe('useLicenseLimitNotification', () => {
     setup();
 
     expect(toggleNotification).toHaveBeenCalledWith({
-      type: 'warning',
+      type: 'danger',
       message:
         "Add seats to invite Users. If you already did it but it's not reflected in Strapi yet, make sure to restart your app.",
-      title: 'Over seat limit (5/5)',
+      title: 'Over seat limit (6/5)',
       link: {
-        url: 'https://strapi.io/billing/request-seats',
-        label: 'CONTACT SALES',
+        url: 'https://strapi.io/billing/manage-seats',
+        label: 'Manage seats',
       },
       blockTransition: true,
       onClose: expect.any(Function),
     });
   });
 
-  it('should have cloud billing url if is hosted on strapi cloud', () => {
+  it('should have Contact sales url if is Gold license', () => {
     // @ts-expect-error – mock
     useLicenseLimits.mockImplementationOnce(() => ({
       license: {
         ...baseLicenseInfo,
-        isHostedOnStrapiCloud: true,
+        licenseLimitStatus: 'OVER_LIMIT',
+        type: 'gold',
       },
     }));
 
     setup();
 
     expect(toggleNotification).toHaveBeenCalledWith({
-      type: 'softWarning',
+      type: 'danger',
       message:
-        "Add seats to re-enable Users. If you already did it but it's not reflected in Strapi yet, make sure to restart your app.",
-      title: 'At seat limit (5/5)',
+        "Add seats to invite Users. If you already did it but it's not reflected in Strapi yet, make sure to restart your app.",
+      title: 'Over seat limit (5/5)',
       link: {
-        url: 'https://cloud.strapi.io/profile/billing',
-        label: 'ADD SEATS',
+        url: 'https://strapi.io/billing/request-seats',
+        label: 'Contact sales',
       },
       blockTransition: true,
       onClose: expect.any(Function),

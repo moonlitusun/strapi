@@ -1,12 +1,14 @@
 import { PassThrough, Transform, Readable, Writable } from 'stream';
+import { pipeline } from 'stream/promises';
 import { extname } from 'path';
 import { EOL } from 'os';
 import type Chain from 'stream-chain';
 import { chain } from 'stream-chain';
-import { isEmpty, uniq, last, isNumber, difference, set, omit } from 'lodash/fp';
+import { isEmpty, uniq, last, isNumber, set, pick } from 'lodash/fp';
 import { diff as semverDiff } from 'semver';
 
-import type { Schema, Utils } from '@strapi/types';
+import type { Struct, Utils } from '@strapi/types';
+
 import type {
   IAsset,
   IDestinationProvider,
@@ -40,7 +42,7 @@ import {
   createDiagnosticReporter,
   IDiagnosticReporter,
   ErrorDiagnosticSeverity,
-} from './diagnostic';
+} from '../utils/diagnostic';
 import { DataTransferError } from '../errors';
 import * as utils from '../utils';
 import { ProviderTransferError } from '../errors/providers';
@@ -83,11 +85,11 @@ export const TransferGroupPresets: TransferGroupFilter = {
 export const DEFAULT_VERSION_STRATEGY = 'ignore';
 export const DEFAULT_SCHEMA_STRATEGY = 'strict';
 
-type SchemaMap = Utils.String.Dict<Schema.Schema>;
+type SchemaMap = Utils.String.Dict<Struct.Schema>;
 
 class TransferEngine<
   S extends ISourceProvider = ISourceProvider,
-  D extends IDestinationProvider = IDestinationProvider
+  D extends IDestinationProvider = IDestinationProvider,
 > implements ITransferEngine
 {
   sourceProvider: ISourceProvider;
@@ -118,6 +120,10 @@ class TransferEngine<
     errors: {},
   };
 
+  #currentStreamController?: AbortController;
+
+  #aborted: boolean = false;
+
   onSchemaDiff(handler: SchemaDiffHandler) {
     this.#handlers?.schemaDiff?.push(handler);
   }
@@ -141,9 +147,6 @@ class TransferEngine<
 
     return !!context.ignore;
   }
-
-  // Save the currently open stream so that we can access it at any time
-  #currentStream?: Writable;
 
   constructor(sourceProvider: S, destinationProvider: D, options: ITransferEngineOptions) {
     this.diagnostics = createDiagnosticReporter();
@@ -199,7 +202,7 @@ class TransferEngine<
   reportInfo(message: string, params?: unknown) {
     this.diagnostics.report({
       kind: 'info',
-      details: { createdAt: new Date(), message, params },
+      details: { createdAt: new Date(), message, params, origin: 'engine' },
     });
   }
 
@@ -421,7 +424,7 @@ class TransferEngine<
       const schemaDiffs = compareSchemas(sourceSchema, destinationSchema, strategy);
 
       if (schemaDiffs.length) {
-        diffs[key] = schemaDiffs as Diff<Schema.Schema>[];
+        diffs[key] = schemaDiffs as Diff<Struct.Schema>[];
       }
     });
 
@@ -507,6 +510,10 @@ class TransferEngine<
     transform?: PassThrough | Chain;
     tracker?: PassThrough;
   }) {
+    if (this.#aborted) {
+      throw new TransferEngineError('fatal', 'Transfer aborted.');
+    }
+
     const { stage, source, destination, transform, tracker } = options;
 
     const updateEndTime = () => {
@@ -546,43 +553,52 @@ class TransferEngine<
 
     this.#emitStageUpdate('start', stage);
 
-    await new Promise<void>((resolve, reject) => {
-      let stream: Readable = source;
+    try {
+      const streams: (Readable | Writable)[] = [source];
 
       if (transform) {
-        stream = stream.pipe(transform);
+        streams.push(transform);
       }
-
       if (tracker) {
-        stream = stream.pipe(tracker);
+        streams.push(tracker);
       }
 
-      this.#currentStream = stream
-        .pipe(destination)
-        .on('error', (e) => {
-          updateEndTime();
-          this.#emitStageUpdate('error', stage);
-          this.reportError(e, 'error');
-          destination.destroy(e);
-          reject(e);
-        })
-        .on('close', () => {
-          this.#currentStream = undefined;
-          updateEndTime();
-          resolve();
-        });
-    });
+      streams.push(destination);
 
-    this.#emitStageUpdate('finish', stage);
+      // NOTE: to debug/confirm backpressure issues from misbehaving stream, uncomment the following lines
+      // source.on('pause', () => console.log(`[${stage}] Source paused due to backpressure`));
+      // source.on('resume', () => console.log(`[${stage}] Source resumed`));
+      // destination.on('drain', () =>
+      //   console.log(`[${stage}] Destination drained, resuming data flow`)
+      // );
+      // destination.on('error', (err) => console.error(`[${stage}] Destination error:`, err));
+
+      const controller = new AbortController();
+      const { signal } = controller;
+
+      // Store the controller so you can cancel later
+      this.#currentStreamController = controller;
+
+      await pipeline(streams, { signal });
+
+      this.#emitStageUpdate('finish', stage);
+    } catch (e) {
+      updateEndTime();
+      this.#emitStageUpdate('error', stage);
+      this.reportError(e as Error, 'error');
+      if (!destination.destroyed) {
+        destination.destroy(e as Error);
+      }
+    } finally {
+      updateEndTime();
+    }
   }
 
   // Cause an ongoing transfer to abort gracefully
   async abortTransfer(): Promise<void> {
-    const err = new TransferEngineError('fatal', 'Transfer aborted.');
-    if (!this.#currentStream) {
-      throw err;
-    }
-    this.#currentStream.destroy(err);
+    this.#aborted = true;
+    this.#currentStreamController?.abort();
+    throw new TransferEngineError('fatal', 'Transfer aborted.');
   }
 
   async init(): Promise<void> {
@@ -603,8 +619,8 @@ class TransferEngine<
    */
   async bootstrap(): Promise<void> {
     const results = await Promise.allSettled([
-      this.sourceProvider.bootstrap?.(),
-      this.destinationProvider.bootstrap?.(),
+      this.sourceProvider.bootstrap?.(this.diagnostics),
+      this.destinationProvider.bootstrap?.(this.diagnostics),
     ]);
 
     results.forEach((result) => {
@@ -801,7 +817,7 @@ class TransferEngine<
 
     const transform = this.#createStageTransformStream(stage);
     const tracker = this.#progressTracker(stage, {
-      key: (value: Schema.Schema) => value.modelType,
+      key: (value: Struct.Schema) => value.modelType,
     });
 
     await this.#transferStage({ stage, source, destination, transform, tracker });
@@ -839,9 +855,8 @@ class TransferEngine<
 
           const { type, data } = entity;
           const attributes = schemas[type].attributes;
-
-          const attributesToRemove = difference(Object.keys(data), Object.keys(attributes));
-          const updatedEntity = set('data', omit(attributesToRemove, data), entity);
+          const attributesToKeep = Object.keys(attributes).concat('documentId');
+          const updatedEntity = set('data', pick(attributesToKeep, data), entity);
 
           callback(null, updatedEntity);
         },

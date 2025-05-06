@@ -1,9 +1,8 @@
 {
-  "$schema": "./node_modules/nx/schemas/nx-schema.json",
   "namedInputs": {
     "default": ["{projectRoot}/**/*"],
     "production": [
-      "default",
+      "{workspaceRoot}/rollup.utils.mjs",
       "!{projectRoot}/**/*.test.ts",
       "!{projectRoot}/**/*.test.js",
       "!{projectRoot}/**/*.test.api.js",
@@ -22,18 +21,29 @@
   },
   "targetDefaults": {
     "build": {
-      "inputs": ["production", "^production"],
-      "dependsOn": ["^build"]
+      "inputs": ["default", "^production"],
+      "outputs": ["{projectRoot}/dist"],
+      "dependsOn": ["^build"],
+      "cache": true
     },
-    "build:ts": {
-      "inputs": ["production", "^production", "{workspaceRoot}/packages/utils/tsconfig/**/*"],
-      "dependsOn": ["^build:ts"]
+    "build:code": {
+      "inputs": ["default", "^production"],
+      "outputs": ["{projectRoot}/dist"],
+      "cache": true
+    },
+    "build:types": {
+      "inputs": ["default", "^production"],
+      "outputs": ["{projectRoot}/dist"],
+      "dependsOn": ["^build:types"],
+      "cache": true
     },
     "test:unit": {
-      "inputs": ["default", "{workspaceRoot}/jest-preset.unit.js"]
+      "inputs": ["default", "{workspaceRoot}/jest-preset.unit.js"],
+      "cache": true
     },
     "test:front": {
-      "inputs": ["default", "{workspaceRoot}/jest-preset.front.js"]
+      "inputs": ["default", "{workspaceRoot}/jest-preset.front.js"],
+      "cache": true
     },
     "lint": {
       "inputs": [
@@ -43,14 +53,64 @@
         "{projectRoot}/.eslintignore",
         "{projectRoot}/tsconfig.eslint.json",
         "{workspaceRoot}/packages/utils/eslint-config-custom/**/*"
-      ]
+      ],
+      "cache": true
     }
   },
-  "tasksRunnerOptions": {
-    "default": {
-      "runner": "nx/tasks-runners/default",
-      "options": {
-        "cacheableOperations": ["build", "build:ts", "lint", "test:unit", "test:front"]
+  "useInferencePlugins": false,
+  "parallel": 8,
+  "pluginsConfig": {
+    "@nx/js": {
+      "analyzeSourceFiles": false
+    }
+  },
+  "release": {
+    "projects": ["packages/**/*", ".github/actions/check-pr-status", "scripts/front"],
+    "changelog": {
+      "workspaceChangelog": {
+        "file": false,
+        "createRelease": "github"
+      }
+    },
+    "version": {
+      "conventionalCommits": false,
+      "git": {
+        "commitMessage": "release: {version}"
+      }
+    },
+    "conventionalCommits": {
+      "types": {
+        "docs": {
+          "changelog": {
+            "title": "📚 Documentation Changes"
+          }
+        },
+        "enhancement": {
+          "changelog": {
+            "title": "💅 Enhancement"
+          }
+        },
+        "feat": {
+          "changelog": {
+            "title": "🚀 New feature"
+          }
+        },
+        "fix": {
+          "changelog": {
+            "title": "🔥 Bug fix"
+          }
+        },
+        "security": {
+          "semverBump": "patch",
+          "changelog": {
+            "title": "🚨 Security"
+          }
+        },
+        "chore": {
+          "changelog": {
+            "title": "⚙️ Chore"
+          }
+        }
       }
     }
   }

@@ -1,5 +1,5 @@
 import { PassThrough, Readable, Writable } from 'stream';
-import type { Schema, Utils } from '@strapi/types';
+import type { Struct, Utils } from '@strapi/types';
 import { WebSocket } from 'ws';
 import { castArray } from 'lodash/fp';
 
@@ -13,6 +13,7 @@ import type {
   ProviderType,
   TransferStage,
 } from '../../../../types';
+import type { IDiagnosticReporter } from '../../../utils/diagnostic';
 import { Client, Server, Auth } from '../../../../types/remote/protocol';
 import { ProviderTransferError, ProviderValidationError } from '../../../errors/providers';
 import { TRANSFER_PATH } from '../../remote/constants';
@@ -26,7 +27,11 @@ export interface IRemoteStrapiSourceProviderOptions extends ILocalStrapiSourcePr
     retryMessageTimeout: number; // milliseconds to wait for a response from a message
     retryMessageMaxRetries: number; // max number of retries for a message before aborting transfer
   };
+  streamTimeout?: number; // milliseconds to wait between chunks of an asset before aborting the transfer
 }
+
+type QueueableAction = Protocol.Client.TransferAssetFlow &
+  ({ action: 'stream' } | { action: 'end' });
 
 class RemoteStrapiSourceProvider implements ISourceProvider {
   name = 'source::remote-strapi';
@@ -39,13 +44,23 @@ class RemoteStrapiSourceProvider implements ISourceProvider {
 
   dispatcher: ReturnType<typeof createDispatcher> | null;
 
+  defaultOptions: Partial<IRemoteStrapiSourceProviderOptions> = {
+    streamTimeout: 15000,
+  };
+
   constructor(options: IRemoteStrapiSourceProviderOptions) {
-    this.options = options;
+    this.options = {
+      ...this.defaultOptions,
+      ...options,
+    };
+
     this.ws = null;
     this.dispatcher = null;
   }
 
   results?: ISourceProviderTransferResults | undefined;
+
+  #diagnostics?: IDiagnosticReporter;
 
   async #createStageReadStream(stage: Exclude<TransferStage, 'schemas'>) {
     const startResult = await this.#startStep(stage);
@@ -84,7 +99,6 @@ class RemoteStrapiSourceProvider implements ISourceProvider {
       }
 
       // if we get a single items instead of a batch
-      // TODO V5: in v5 only allow array
       for (const item of castArray(data)) {
         stream.push(item);
       }
@@ -120,58 +134,195 @@ class RemoteStrapiSourceProvider implements ISourceProvider {
   };
 
   async createAssetsReadStream(): Promise<Readable> {
-    const assets: {
-      [filename: string]: IAsset & {
-        stream: PassThrough;
-      };
-    } = {};
-
+    // Create the streams used to transfer the assets
     const stream = await this.#createStageReadStream('assets');
     const pass = new PassThrough({ objectMode: true });
 
+    // Init the asset map
+    const assets: {
+      // TODO: could we include filename in this for improved logging?
+      [assetID: string]: IAsset & {
+        stream: PassThrough;
+        queue: Array<QueueableAction>;
+        status: 'ok' | 'closed' | 'errored';
+        timeout?: NodeJS.Timeout;
+      };
+    } = {};
+
+    // Watch for stalled assets; if we don't receive a chunk within timeout, abort transfer
+    const resetTimeout = (assetID: string) => {
+      if (assets[assetID].timeout) {
+        clearTimeout(assets[assetID].timeout);
+      }
+      assets[assetID].timeout = setTimeout(() => {
+        this.#reportInfo(`Asset ${assetID} transfer stalled, aborting.`);
+        assets[assetID].status = 'errored';
+        assets[assetID].stream.destroy(new Error(`Asset ${assetID} transfer timed out`));
+      }, this.options.streamTimeout);
+    };
+
     stream
+      /**
+       * Process a payload of many transfer assets and performs the following tasks:
+       * - Start: creates a stream for new assets.
+       * - Stream: writes asset chunks to the asset's stream.
+       * - End: closes the stream after the asset s transferred and cleanup related resources.
+       */
       .on('data', async (payload: Protocol.Client.TransferAssetFlow[]) => {
         for (const item of payload) {
-          const { action } = item;
+          const { action, assetID } = item;
 
           // Creates the stream to send the incoming asset through
           if (action === 'start') {
-            // Each asset has its own stream identified by its assetID
-            assets[item.assetID] = { ...item.data, stream: new PassThrough() };
-            await this.writeAsync(pass, assets[item.assetID]);
-          }
+            // if a transfer has already been started for the same asset ID, something is wrong
+            if (assets[assetID]) {
+              throw new Error(`Asset ${assetID} already started`);
+            }
 
-          // Writes the asset data to the created stream
-          else if (action === 'stream') {
-            // Converts data into buffer
-            const rawBuffer = item.data as unknown as {
-              type: 'Buffer';
-              data: Uint8Array;
+            this.#reportInfo(`Asset ${assetID} starting`);
+            // Register the asset
+            assets[assetID] = {
+              ...item.data,
+              stream: new PassThrough(),
+              status: 'ok',
+              queue: [],
             };
-            const chunk = Buffer.from(rawBuffer.data);
 
-            await this.writeAsync(assets[item.assetID].stream, chunk);
+            resetTimeout(assetID);
+
+            // Connect the individual asset stream to the main asset stage stream
+            // Note: nothing is transferred until data chunks are fed to the asset stream
+            await this.writeAsync(pass, assets[assetID]);
           }
 
-          // The asset has been transferred
-          else if (action === 'end') {
-            await new Promise<void>((resolve, reject) => {
-              const { stream: assetStream } = assets[item.assetID];
-              assetStream
-                .on('close', () => {
-                  // Deletes the stream for the asset
-                  delete assets[item.assetID];
-                  resolve();
-                })
-                .on('error', reject)
-                .end();
-            });
+          // Writes the asset's data chunks to their corresponding stream
+          // "end" is considered a chunk, but it's not a data chunk, it's a control message
+          // That is done so that we don't complicate the already complicated async processing of the queue
+          else if (action === 'stream' || action === 'end') {
+            // If the asset hasn't been registered, or if it's been closed already, something is wrong
+            if (!assets[assetID]) {
+              throw new Error(`No id matching ${assetID} for stream action`);
+            }
+
+            // On every action, reset the timeout timer
+            if (action === 'stream') {
+              resetTimeout(assetID);
+            } else {
+              clearTimeout(assets[assetID].timeout);
+            }
+
+            if (assets[assetID].status === 'closed') {
+              throw new Error(`Asset ${assetID} is closed`);
+            }
+
+            assets[assetID].queue.push(item);
+          }
+        }
+
+        // each new payload will start new processQueue calls, which may cause some extra calls
+        // it's essentially saying "start processing this asset again, I added more data to the queue"
+        for (const assetID in assets) {
+          if (Object.prototype.hasOwnProperty.call(assets, assetID)) {
+            const asset = assets[assetID];
+            if (asset.queue?.length > 0) {
+              await processQueue(assetID);
+            }
           }
         }
       })
       .on('close', () => {
         pass.end();
       });
+
+    /**
+     * Start processing the queue for a given assetID
+     *
+     * Even though this is a loop that attempts to process the entire queue, it is safe to call this more than once
+     * for the same asset id because the queue is shared globally, the items are shifted off, and immediately written
+     */
+    const processQueue = async (id: string) => {
+      if (!assets[id]) {
+        throw new Error(`Failed to write asset chunk for "${id}". Asset not found.`);
+      }
+
+      const asset = assets[id];
+      const { status: currentStatus } = asset;
+
+      if (['closed', 'errored'].includes(currentStatus)) {
+        throw new Error(
+          `Failed to write asset chunk for "${id}". The asset is currently "${currentStatus}"`
+        );
+      }
+
+      while (asset.queue.length > 0) {
+        const data = asset.queue.shift();
+
+        if (!data) {
+          throw new Error(`Invalid chunk found for ${id}`);
+        }
+
+        try {
+          // if this is an end chunk, close the asset stream
+          if (data.action === 'end') {
+            this.#reportInfo(`Ending asset stream for ${id}`);
+            await closeAssetStream(id);
+            break; // Exit the loop after closing the stream
+          }
+
+          // Save the current chunk
+          await writeChunkToStream(id, data);
+        } catch {
+          if (!assets[id]) {
+            throw new Error(`No id matching ${id} for writeAssetChunk`);
+          }
+        }
+      }
+    };
+
+    /**
+     * Writes a chunk of data to the asset's stream.
+     *
+     * Only check if the targeted asset exists, no other validation is done.
+     */
+    const writeChunkToStream = async (id: string, data: unknown) => {
+      const asset = assets[id];
+
+      if (!asset) {
+        throw new Error(`Failed to write asset chunk for "${id}". Asset not found.`);
+      }
+
+      const rawBuffer = data as { type: 'Buffer'; data: Uint8Array };
+      const chunk = Buffer.from(rawBuffer.data);
+
+      await this.writeAsync(asset.stream, chunk);
+    };
+
+    /**
+     * Closes the asset stream associated with the given ID.
+     *
+     * It deletes the stream for the asset upon successful closure.
+     */
+    const closeAssetStream = async (id: string) => {
+      if (!assets[id]) {
+        throw new Error(`Failed to close asset "${id}". Asset not found.`);
+      }
+
+      assets[id].status = 'closed';
+
+      await new Promise<void>((resolve, reject) => {
+        const { stream } = assets[id];
+
+        stream
+          .on('close', () => {
+            resolve();
+          })
+          .on('error', (e) => {
+            assets[id].status = 'errored';
+            reject(new Error(`Failed to close asset "${id}". Asset stream error: ${e.toString()}`));
+          })
+          .end();
+      });
+    };
 
     return pass;
   }
@@ -214,7 +365,19 @@ class RemoteStrapiSourceProvider implements ISourceProvider {
     return res.transferID;
   }
 
-  async bootstrap(): Promise<void> {
+  #reportInfo(message: string) {
+    this.#diagnostics?.report({
+      details: {
+        createdAt: new Date(),
+        message,
+        origin: 'remote-source-provider',
+      },
+      kind: 'info',
+    });
+  }
+
+  async bootstrap(diagnostics?: IDiagnosticReporter): Promise<void> {
+    this.#diagnostics = diagnostics;
     const { url, auth } = this.options;
     let ws: WebSocket;
     this.assertValidProtocol(url);
@@ -223,15 +386,16 @@ class RemoteStrapiSourceProvider implements ISourceProvider {
       url.pathname
     )}${TRANSFER_PATH}/pull`;
 
+    this.#reportInfo('establishing websocket connection');
     // No auth defined, trying public access for transfer
     if (!auth) {
-      ws = await connectToWebsocket(wsUrl);
+      ws = await connectToWebsocket(wsUrl, undefined, this.#diagnostics);
     }
 
     // Common token auth, this should be the main auth method
     else if (auth.type === 'token') {
       const headers = { Authorization: `Bearer ${auth.token}` };
-      ws = await connectToWebsocket(wsUrl, { headers });
+      ws = await connectToWebsocket(wsUrl, { headers }, this.#diagnostics);
     }
 
     // Invalid auth method provided
@@ -244,10 +408,19 @@ class RemoteStrapiSourceProvider implements ISourceProvider {
       });
     }
 
+    this.#reportInfo('established websocket connection');
     this.ws = ws;
     const { retryMessageOptions } = this.options;
-    this.dispatcher = createDispatcher(this.ws, retryMessageOptions);
+
+    this.#reportInfo('creating dispatcher');
+    this.dispatcher = createDispatcher(this.ws, retryMessageOptions, (message: string) =>
+      this.#reportInfo(message)
+    );
+    this.#reportInfo('creating dispatcher');
+
+    this.#reportInfo('initialize transfer');
     const transferID = await this.initTransfer();
+    this.#reportInfo(`initialized transfer ${transferID}`);
 
     this.dispatcher.setTransferProperties({ id: transferID, kind: 'pull' });
     await this.dispatcher.dispatchTransferAction('bootstrap');
@@ -270,11 +443,9 @@ class RemoteStrapiSourceProvider implements ISourceProvider {
 
   async getSchemas() {
     const schemas =
-      (await this.dispatcher?.dispatchTransferAction<Utils.String.Dict<Schema.Schema>>(
-        'getSchemas'
-      )) ?? null;
+      await this.dispatcher?.dispatchTransferAction<Utils.String.Dict<Struct.Schema>>('getSchemas');
 
-    return schemas;
+    return schemas ?? null;
   }
 
   async #startStep<T extends Client.TransferPullStep>(step: T) {

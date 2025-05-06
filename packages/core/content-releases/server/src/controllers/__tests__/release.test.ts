@@ -18,7 +18,7 @@ jest.mock('../../utils', () => ({
 }));
 
 describe('Release controller', () => {
-  describe('findMany', () => {
+  describe('findPage', () => {
     it('should call findPage', async () => {
       mockFindPage.mockResolvedValue({ results: [], pagination: {} });
       mockFindManyWithContentTypeEntryAttached.mockResolvedValue([]);
@@ -35,7 +35,6 @@ describe('Release controller', () => {
         },
       };
       global.strapi = {
-        // @ts-expect-error Ignore missing properties
         admin: {
           services: {
             permission: {
@@ -47,51 +46,17 @@ describe('Release controller', () => {
             },
           },
         },
-        query: jest.fn().mockReturnValue({
-          count: jest.fn().mockResolvedValue(2),
-        }),
-      };
+        db: {
+          query: jest.fn().mockReturnValue({
+            count: jest.fn().mockResolvedValue(2),
+          }),
+        },
+      } as any;
 
       // @ts-expect-error partial context
-      await releaseController.findMany(ctx);
+      await releaseController.findPage(ctx);
 
       expect(mockFindPage).toHaveBeenCalled();
-    });
-
-    it('should call findManyWithoutContentTypeEntryAttached', async () => {
-      mockFindPage.mockResolvedValue({ results: [], pagination: {} });
-      mockFindManyWithContentTypeEntryAttached.mockResolvedValue([]);
-      const userAbility = {
-        can: jest.fn(),
-      };
-      const ctx = {
-        state: {
-          userAbility: {},
-        },
-        query: {
-          contentTypeUid: 'api::kitchensink.kitchensink',
-          entryId: 1,
-        },
-      };
-      global.strapi = {
-        // @ts-expect-error Ignore missing properties
-        admin: {
-          services: {
-            permission: {
-              createPermissionsManager: jest.fn(() => ({
-                ability: userAbility,
-                validateQuery: jest.fn(),
-                sanitizeQuery: jest.fn(() => ctx.query),
-              })),
-            },
-          },
-        },
-      };
-
-      // @ts-expect-error partial context
-      await releaseController.findMany(ctx);
-
-      expect(mockFindManyWithoutContentTypeEntryAttached).toHaveBeenCalled();
     });
   });
   describe('create', () => {
@@ -158,9 +123,7 @@ describe('Release controller', () => {
 
   describe('findOne', () => {
     beforeAll(() => {
-      // @ts-expect-error Ignore global error
       global.strapi = {
-        // @ts-expect-error Ignore global error
         ...global.strapi,
         admin: {
           services: {
@@ -186,7 +149,7 @@ describe('Release controller', () => {
             },
           },
         },
-      };
+      } as any;
     });
 
     it('throws an error if the release does not exists', async () => {
@@ -264,7 +227,88 @@ describe('Release controller', () => {
 
       // @ts-expect-error partial context
       await releaseController.findOne(ctx);
-      expect(strapi.admin.services.user.sanitizeUser).toHaveBeenCalled();
+      expect(strapi.service('admin::user').sanitizeUser).toHaveBeenCalled();
+    });
+  });
+
+  describe.skip('mapEntriesToReleases', () => {
+    it('should throw an error if contentTypeUid or entriesIds are missing', async () => {
+      const ctx = {
+        query: {},
+      };
+
+      // @ts-expect-error partial context
+      await expect(() => releaseController.mapEntriesToReleases(ctx)).rejects.toThrow(
+        'Missing required query parameters'
+      );
+    });
+
+    it('should call findManyWithContentTypeEntryAttached with correct parameters', async () => {
+      const ctx = {
+        query: {
+          contentTypeUid: 'api::kitchensink.kitchensink',
+          entriesIds: [1, 2, 3],
+        },
+      };
+
+      const mockRelease = {
+        id: 1,
+        name: 'Test Release',
+        actions: [
+          {
+            entry: {
+              id: 1,
+            },
+          },
+        ],
+      };
+
+      mockFindManyWithContentTypeEntryAttached.mockResolvedValue([mockRelease]);
+
+      // @ts-expect-error partial context
+      await releaseController.mapEntriesToReleases(ctx);
+
+      expect(mockFindManyWithContentTypeEntryAttached).toHaveBeenCalledWith(
+        'api::kitchensink.kitchensink',
+        [1, 2, 3]
+      );
+    });
+
+    it('should map entries to releases correctly', async () => {
+      const ctx = {
+        query: {
+          contentTypeUid: 'api::kitchensink.kitchensink',
+          entriesIds: [1, 2, 3],
+        },
+        body: { data: {} },
+      };
+
+      const mockRelease = {
+        id: 1,
+        name: 'Test Release',
+        actions: [
+          {
+            entry: {
+              id: 1,
+            },
+          },
+          {
+            entry: {
+              id: 2,
+            },
+          },
+        ],
+      };
+
+      mockFindManyWithContentTypeEntryAttached.mockResolvedValue([mockRelease]);
+
+      // @ts-expect-error partial context
+      await releaseController.mapEntriesToReleases(ctx);
+
+      expect(ctx.body.data).toEqual({
+        1: [{ id: 1, name: 'Test Release' }],
+        2: [{ id: 1, name: 'Test Release' }],
+      });
     });
   });
 });

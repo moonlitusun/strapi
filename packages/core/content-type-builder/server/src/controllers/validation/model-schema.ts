@@ -1,7 +1,7 @@
 import { yup } from '@strapi/utils';
 import _ from 'lodash';
 import { snakeCase } from 'lodash/fp';
-import { modelTypes, FORBIDDEN_ATTRIBUTE_NAMES, typeKinds } from '../../services/constants';
+import { modelTypes, typeKinds } from '../../services/constants';
 import { getService } from '../../utils';
 import { isValidKey, isValidCollectionName } from './common';
 import { getTypeValidator } from './types';
@@ -22,12 +22,11 @@ export const createSchema = (
 ) => {
   const shape = {
     description: yup.string(),
-    draftAndPublish: yup.boolean(),
     options: yup.object(),
     pluginOptions: yup.object(),
     collectionName: yup.string().nullable().test(isValidCollectionName),
     attributes: createAttributesValidator({ types, relations, modelType }),
-    reviewWorkflows: yup.boolean(),
+    draftAndPublish: yup.boolean(),
   } as any;
 
   if (modelType === modelTypes.CONTENT_TYPE) {
@@ -78,22 +77,11 @@ const isConflictingKey = (key: string, attributes: Record<string, any>) => {
 };
 
 const isForbiddenKey = (key: string) => {
-  const snakeCaseKey = snakeCase(key);
-  const reservedNames = [
-    ...FORBIDDEN_ATTRIBUTE_NAMES,
-    ...getService('builder').getReservedNames().attributes,
-  ];
-
-  return reservedNames.some((reserved) => {
-    return snakeCase(reserved) === snakeCaseKey;
-  });
+  return getService('builder').isReservedAttributeName(key);
 };
 
 const forbiddenValidator = () => {
-  const reservedNames = [
-    ...FORBIDDEN_ATTRIBUTE_NAMES,
-    ...getService('builder').getReservedNames().attributes,
-  ];
+  const reservedNames = [...getService('builder').getReservedNames().attributes];
 
   return yup.mixed().test({
     name: 'forbiddenKeys',

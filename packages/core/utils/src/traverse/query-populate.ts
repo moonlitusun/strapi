@@ -6,15 +6,15 @@ import {
   split,
   isObject,
   trim,
+  constant,
   isNil,
+  identity,
   cloneDeep,
   join,
   first,
-  omit,
-  merge,
 } from 'lodash/fp';
 
-import traverseFactory from './factory';
+import traverseFactory, { type Parent } from './factory';
 import { Attribute } from '../types';
 import { isMorphToRelationalAttribute } from '../content-types';
 
@@ -24,40 +24,68 @@ const isKeyword = (keyword: string) => {
   };
 };
 
+const isWildcard = (value: unknown): value is '*' => value === '*';
+
+const isPopulateString = (value: unknown): value is string => {
+  return isString(value) && !isWildcard(value);
+};
+
 const isStringArray = (value: unknown): value is string[] =>
   isArray(value) && value.every(isString);
-
-const isWildCardConstant = (value: unknown): value is '*' => value === '*';
 
 const isObj = (value: unknown): value is Record<string, unknown> => isObject(value);
 
 const populate = traverseFactory()
-  // Array of strings ['foo', 'foo.bar'] => map(recurse), then filter out empty items
+  .intercept(isPopulateString, async (visitor, options, populate, { recurse }) => {
+    /**
+     * Ensure the populate clause its in the extended format ( { populate: { ... } }, and not just a string)
+     * This gives a consistent structure to track the "parent" node of each nested populate clause
+     */
+    const populateObject = pathsToObjectPopulate([populate]);
+    const traversedPopulate = (await recurse(visitor, options, populateObject)) as PopulateObject;
+    const [result] = objectPopulateToPaths(traversedPopulate);
+
+    return result;
+  })
+  // Array of strings ['foo', 'bar.baz'] => map(recurse), then filter out empty items
   .intercept(isStringArray, async (visitor, options, populate, { recurse }) => {
-    const visitedPopulate = await Promise.all(
-      populate.map((nestedPopulate) => recurse(visitor, options, nestedPopulate))
+    const paths = await Promise.all(
+      populate.map((subClause) => recurse(visitor, options, subClause))
     );
 
-    return visitedPopulate.filter((item) => !isNil(item));
+    return paths.filter((item) => !isNil(item));
   })
-  // Transform wildcard populate to an exhaustive list of attributes to populate.
-  .intercept(isWildCardConstant, (visitor, options, _data, { recurse }) => {
-    const attributes = options.schema?.attributes;
+  // for wildcard, generate custom utilities to modify the values
+  .parse(isWildcard, () => ({
+    /**
+     * Since value is '*', we don't need to transform it
+     */
+    transform: identity,
 
-    // This should never happen, but adding the check in
-    // case this method is called with wrong parameters
-    if (!attributes) {
-      return '*';
-    }
+    /**
+     * '*' isn't a key/value structure, so regardless
+     *  of the given key, it returns the data ('*')
+     */
+    get: (_key, data) => data,
 
-    const parsedPopulate = Object.entries(attributes)
-      // Get the list of all attributes that can be populated
-      .filter(([, value]) => ['relation', 'component', 'dynamiczone', 'media'].includes(value.type))
-      // Only keep the attributes key
-      .reduce((acc, [key]) => ({ ...acc, [key]: true }), {});
+    /**
+     * '*' isn't a key/value structure, so regardless
+     * of the given `key`, use `value` as the new `data`
+     */
+    set: (_key, value) => value,
 
-    return recurse(visitor, options, parsedPopulate);
-  })
+    /**
+     * '*' isn't a key/value structure, but we need to simulate at least one to enable
+     * the data traversal. We're using '' since it represents a falsy string value
+     */
+    keys: constant(['']),
+
+    /**
+     * Removing '*' means setting it to undefined, regardless of the given key
+     */
+    remove: constant(undefined),
+  }))
+
   // Parse string values
   .parse(isString, () => {
     const tokenize = split('.');
@@ -118,120 +146,181 @@ const populate = traverseFactory()
     },
   }))
   .ignore(({ key, attribute }) => {
+    // we don't want to recurse using traversePopulate and instead let
+    // the visitors recurse with the appropriate traversal (sort, filters, etc...)
     return ['sort', 'filters', 'fields'].includes(key) && !attribute;
   })
   .on(
     // Handle recursion on populate."populate"
     isKeyword('populate'),
-    async ({ key, visitor, path, value, schema }, { set, recurse }) => {
-      const newValue = await recurse(visitor, { schema, path }, value);
+    async ({ key, visitor, path, value, schema, getModel, attribute }, { set, recurse }) => {
+      const parent: Parent = { key, path, schema, attribute };
+
+      const newValue = await recurse(visitor, { schema, path, getModel, parent }, value);
 
       set(key, newValue);
     }
   )
-  .on(isKeyword('on'), async ({ key, visitor, path, value }, { set, recurse }) => {
-    const newOn: Record<string, unknown> = {};
+  .on(
+    isKeyword('on'),
+    async ({ key, visitor, path, value, getModel, parent }, { set, recurse }) => {
+      const newOn: Record<string, unknown> = {};
 
-    if (!isObj(value)) {
-      return;
-    }
-
-    for (const [uid, subPopulate] of Object.entries(value)) {
-      const model = strapi.getModel(uid);
-      const newPath = { ...path, raw: `${path.raw}[${uid}]` };
-
-      newOn[uid] = await recurse(visitor, { schema: model, path: newPath }, subPopulate);
-    }
-
-    set(key, newOn);
-  })
-  // Handle populate on relation
-  .onRelation(async ({ key, value, attribute, visitor, path, schema }, { set, recurse }) => {
-    if (isNil(value)) {
-      return;
-    }
-
-    if (isMorphToRelationalAttribute(attribute)) {
-      // Don't traverse values that cannot be parsed
-      if (!isObject(value) || !('on' in value && isObject(value?.on))) {
+      if (!isObj(value)) {
         return;
       }
 
-      // If there is a populate fragment defined, traverse it
-      const newValue = await recurse(visitor, { schema, path }, { on: value?.on });
+      for (const [uid, subPopulate] of Object.entries(value)) {
+        const model = getModel(uid);
+        const newPath = { ...path, raw: `${path.raw}[${uid}]` };
 
-      set(key, { on: newValue });
+        newOn[uid] = await recurse(
+          visitor,
+          { schema: model, path: newPath, getModel, parent },
+          subPopulate
+        );
+      }
+
+      set(key, newOn);
     }
+  )
+  // Handle populate on relation
+  .onRelation(
+    async ({ key, value, attribute, visitor, path, schema, getModel }, { set, recurse }) => {
+      if (isNil(value)) {
+        return;
+      }
 
-    const targetSchemaUID = attribute.target;
-    const targetSchema = strapi.getModel(targetSchemaUID);
+      const parent: Parent = { key, path, schema, attribute };
 
-    const newValue = await recurse(visitor, { schema: targetSchema, path }, value);
+      if (isMorphToRelationalAttribute(attribute)) {
+        // Don't traverse values that cannot be parsed
+        if (!isObject(value) || !('on' in value && isObject(value?.on))) {
+          return;
+        }
 
-    set(key, newValue);
-  })
+        // If there is a populate fragment defined, traverse it
+        const newValue = await recurse(
+          visitor,
+          { schema, path, getModel, parent },
+          { on: value?.on }
+        );
+
+        set(key, newValue);
+
+        return;
+      }
+
+      const targetSchemaUID = attribute.target;
+      const targetSchema = getModel(targetSchemaUID!);
+
+      const newValue = await recurse(
+        visitor,
+        { schema: targetSchema, path, getModel, parent },
+        value
+      );
+
+      set(key, newValue);
+    }
+  )
   // Handle populate on media
-  .onMedia(async ({ key, path, visitor, value }, { recurse, set }) => {
+  .onMedia(async ({ key, path, schema, attribute, visitor, value, getModel }, { recurse, set }) => {
     if (isNil(value)) {
       return;
     }
 
-    const targetSchemaUID = 'plugin::upload.file';
-    const targetSchema = strapi.getModel(targetSchemaUID);
+    const parent: Parent = { key, path, schema, attribute };
 
-    const newValue = await recurse(visitor, { schema: targetSchema, path }, value);
+    const targetSchemaUID = 'plugin::upload.file';
+    const targetSchema = getModel(targetSchemaUID);
+
+    const newValue = await recurse(
+      visitor,
+      { schema: targetSchema, path, getModel, parent },
+      value
+    );
 
     set(key, newValue);
   })
   // Handle populate on components
-  .onComponent(async ({ key, value, visitor, path, attribute }, { recurse, set }) => {
-    if (isNil(value)) {
-      return;
+  .onComponent(
+    async ({ key, value, schema, visitor, path, attribute, getModel }, { recurse, set }) => {
+      if (isNil(value)) {
+        return;
+      }
+
+      const parent: Parent = { key, path, schema, attribute };
+
+      const targetSchema = getModel(attribute.component);
+
+      const newValue = await recurse(
+        visitor,
+        { schema: targetSchema, path, getModel, parent },
+        value
+      );
+
+      set(key, newValue);
     }
-
-    const targetSchema = strapi.getModel(attribute.component);
-
-    const newValue = await recurse(visitor, { schema: targetSchema, path }, value);
-
-    set(key, newValue);
-  })
+  )
   // Handle populate on dynamic zones
-  .onDynamicZone(async ({ key, value, attribute, schema, visitor, path }, { set, recurse }) => {
-    if (isNil(value)) {
-      return;
-    }
-
-    if (isObject(value)) {
-      const { components } = attribute;
-
-      const newValue = {};
-
-      // Handle legacy DZ params
-      let newProperties: unknown = omit('on', value);
-
-      for (const componentUID of components) {
-        const componentSchema = strapi.getModel(componentUID);
-
-        const properties = await recurse(visitor, { schema: componentSchema, path }, value);
-        newProperties = merge(newProperties, properties);
+  .onDynamicZone(
+    async ({ key, value, schema, visitor, path, attribute, getModel }, { set, recurse }) => {
+      if (isNil(value) || !isObject(value)) {
+        return;
       }
 
-      Object.assign(newValue, newProperties);
+      const parent: Parent = { key, path, schema, attribute };
 
-      // Handle new morph fragment syntax
+      // Handle fragment syntax
       if ('on' in value && value.on) {
-        const newOn = await recurse(visitor, { schema, path }, { on: value.on });
+        const newOn = await recurse(visitor, { schema, path, getModel, parent }, { on: value.on });
 
-        // Recompose both syntaxes
-        Object.assign(newValue, newOn);
+        set(key, newOn);
       }
-
-      set(key, newValue);
-    } else {
-      const newValue = await recurse(visitor, { schema, path }, value);
-
-      set(key, newValue);
     }
-  });
+  );
 
 export default curry(populate.traverse);
+
+type PopulateObject = {
+  [key: string]: true | { populate: PopulateObject };
+};
+
+const objectPopulateToPaths = (input: PopulateObject): string[] => {
+  const paths: string[] = [];
+
+  function traverse(currentObj: PopulateObject, parentPath: string) {
+    for (const [key, value] of Object.entries(currentObj)) {
+      const currentPath = parentPath ? `${parentPath}.${key}` : key;
+      if (value === true) {
+        paths.push(currentPath);
+      } else {
+        traverse((value as { populate: PopulateObject }).populate, currentPath);
+      }
+    }
+  }
+
+  traverse(input, '');
+
+  return paths;
+};
+
+const pathsToObjectPopulate = (input: string[]): PopulateObject => {
+  const result: PopulateObject = {};
+
+  function traverse(object: PopulateObject, keys: string[]): void {
+    const [first, ...rest] = keys;
+    if (rest.length === 0) {
+      object[first] = true;
+    } else {
+      if (!object[first] || typeof object[first] === 'boolean') {
+        object[first] = { populate: {} };
+      }
+      traverse((object[first] as { populate: PopulateObject }).populate, rest);
+    }
+  }
+
+  input.forEach((clause) => traverse(result, clause.split('.')));
+
+  return result;
+};

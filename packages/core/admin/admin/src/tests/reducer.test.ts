@@ -1,11 +1,18 @@
 import {
-  AppState,
   reducer,
-  setAdminPermissions,
   setAppTheme,
   setAvailableThemes,
   setLocale,
+  login,
+  logout,
+  setToken,
 } from '../reducer';
+import { setCookie, deleteCookie } from '../utils/cookies';
+
+jest.mock('../utils/cookies', () => ({
+  setCookie: jest.fn(),
+  deleteCookie: jest.fn(),
+}));
 
 describe('admin_app reducer', () => {
   afterEach(() => {
@@ -14,211 +21,113 @@ describe('admin_app reducer', () => {
      * We need to clear it after each test to avoid side effects.
      */
     window.localStorage.clear();
+    jest.clearAllMocks();
   });
 
-  it('should return the initial state', () => {
-    expect(reducer(undefined, { type: undefined })).toMatchInlineSnapshot(`
-      {
-        "language": {
-          "locale": "en",
-          "localeNames": {
-            "en": "English",
-          },
-        },
-        "permissions": {},
-        "theme": {
-          "availableThemes": [],
-          "currentTheme": "system",
-        },
-      }
-    `);
-  });
-
-  describe('permissions', () => {
-    it('should set the permissions if there is no current state', () => {
-      expect(
-        reducer(
-          undefined,
-          setAdminPermissions({
-            contentManager: {
-              main: [{ action: 'plugins::content-manager.explorer.create' }],
-              collectionTypesConfigurations: [
-                { action: 'plugin::content-manager.collection-types.configure-view' },
-              ],
-
-              singleTypesConfigurations: [
-                { action: 'plugin::content-manager.single-types.configure-view' },
-              ],
-
-              componentsConfigurations: [
-                { action: 'plugin::content-manager.components.configure-layout' },
-              ],
-            },
-          })
-        )
-      ).toMatchInlineSnapshot(`
-        {
-          "language": {
-            "locale": "en",
-            "localeNames": {
-              "en": "English",
-            },
-          },
-          "permissions": {
-            "contentManager": {
-              "collectionTypesConfigurations": [
-                {
-                  "action": "plugin::content-manager.collection-types.configure-view",
-                },
-              ],
-              "componentsConfigurations": [
-                {
-                  "action": "plugin::content-manager.components.configure-layout",
-                },
-              ],
-              "main": [
-                {
-                  "action": "plugins::content-manager.explorer.create",
-                },
-              ],
-              "singleTypesConfigurations": [
-                {
-                  "action": "plugin::content-manager.single-types.configure-view",
-                },
-              ],
-            },
-          },
-          "theme": {
-            "availableThemes": [],
-            "currentTheme": "system",
-          },
-        }
-      `);
-    });
-
-    it('should overwrite any existing permissions when we set new ones', () => {
-      const previousState: AppState = {
+  describe('admin_app reducer', () => {
+    it('should return the initial state', () => {
+      expect(reducer(undefined, { type: undefined })).toEqual({
         language: {
           locale: 'en',
           localeNames: { en: 'English' },
         },
-        permissions: {
-          contentManager: {
-            main: [{ action: 'plugins::content-manager.explorer.create' }],
-            collectionTypesConfigurations: [
-              { action: 'plugin::content-manager.collection-types.configure-view' },
-            ],
-
-            singleTypesConfigurations: [
-              { action: 'plugin::content-manager.single-types.configure-view' },
-            ],
-
-            componentsConfigurations: [
-              { action: 'plugin::content-manager.components.configure-layout' },
-            ],
-          },
-        },
+        permissions: {},
         theme: {
           availableThemes: [],
           currentTheme: 'system',
         },
-      };
+        token: null,
+      });
+    });
 
-      expect(
-        reducer(
-          previousState,
-          setAdminPermissions({
-            contentManager: {
-              main: [],
-              collectionTypesConfigurations: [],
-              singleTypesConfigurations: [],
-              componentsConfigurations: [],
-            },
-          })
-        )
-      ).toMatchInlineSnapshot(`
-        {
-          "language": {
-            "locale": "en",
-            "localeNames": {
-              "en": "English",
-            },
+    describe('theme', () => {
+      it('should set the theme', () => {
+        const state = reducer(undefined, setAppTheme('dark'));
+
+        expect(state).toEqual({
+          language: {
+            locale: 'en',
+            localeNames: { en: 'English' },
           },
-          "permissions": {
-            "contentManager": {
-              "collectionTypesConfigurations": [],
-              "componentsConfigurations": [],
-              "main": [],
-              "singleTypesConfigurations": [],
-            },
+          permissions: {},
+          theme: {
+            availableThemes: [],
+            currentTheme: 'dark',
           },
-          "theme": {
-            "availableThemes": [],
-            "currentTheme": "system",
+          token: null,
+        });
+      });
+
+      it('should set the available themes', () => {
+        const state = reducer(undefined, setAvailableThemes(['dark', 'light']));
+
+        expect(state).toEqual({
+          language: {
+            locale: 'en',
+            localeNames: { en: 'English' },
           },
-        }
-      `);
+          permissions: {},
+          theme: {
+            availableThemes: ['dark', 'light'],
+            currentTheme: 'system',
+          },
+          token: null,
+        });
+      });
+    });
+
+    describe('language', () => {
+      it('should set the locale', () => {
+        const state = reducer(undefined, setLocale('fr'));
+
+        expect(state).toEqual({
+          language: {
+            locale: 'fr',
+            localeNames: { en: 'English' },
+          },
+          permissions: {},
+          theme: {
+            availableThemes: [],
+            currentTheme: 'system',
+          },
+          token: null,
+        });
+      });
     });
   });
 
-  describe('theme', () => {
-    it('should set the theme', () => {
-      expect(reducer(undefined, setAppTheme('dark'))).toMatchInlineSnapshot(`
-        {
-          "language": {
-            "locale": "en",
-            "localeNames": {
-              "en": "English",
-            },
-          },
-          "permissions": {},
-          "theme": {
-            "availableThemes": [],
-            "currentTheme": "dark",
-          },
-        }
-      `);
+  describe('auth', () => {
+    it('should set the token directly', () => {
+      const result = reducer(undefined, setToken('1234'));
+      expect(result.token).toBe('1234');
     });
 
-    it('should set the available themes', () => {
-      expect(reducer(undefined, setAvailableThemes(['dark', 'light']))).toMatchInlineSnapshot(`
-        {
-          "language": {
-            "locale": "en",
-            "localeNames": {
-              "en": "English",
-            },
-          },
-          "permissions": {},
-          "theme": {
-            "availableThemes": [
-              "dark",
-              "light",
-            ],
-            "currentTheme": "system",
-          },
-        }
-      `);
-    });
-  });
+    it('should handle login with persist=false (session)', () => {
+      const result = reducer(undefined, login({ token: 'abcd', persist: false }));
 
-  describe('language', () => {
-    it('should set the locale', () => {
-      expect(reducer(undefined, setLocale('fr'))).toMatchInlineSnapshot(`
-        {
-          "language": {
-            "locale": "fr",
-            "localeNames": {
-              "en": "English",
-            },
-          },
-          "permissions": {},
-          "theme": {
-            "availableThemes": [],
-            "currentTheme": "system",
-          },
-        }
-      `);
+      expect(result.token).toBe('abcd');
+      expect(setCookie).toHaveBeenCalledWith('jwtToken', 'abcd');
+      expect(localStorage.getItem('isLoggedIn')).toBe('true');
+    });
+
+    it('should handle login with persist=true (localStorage)', () => {
+      const result = reducer(undefined, login({ token: 'abcd', persist: true }));
+
+      expect(result.token).toBe('abcd');
+      expect(localStorage.getItem('jwtToken')).toBe(JSON.stringify('abcd'));
+      expect(setCookie).not.toHaveBeenCalled();
+    });
+
+    it('should handle logout', () => {
+      localStorage.setItem('jwtToken', 'abcd');
+      localStorage.setItem('isLoggedIn', 'true');
+
+      const result = reducer({ ...reducer(undefined, login({ token: 'abcd' })) }, logout());
+
+      expect(result.token).toBe(null);
+      expect(localStorage.getItem('jwtToken')).toBe(null);
+      expect(localStorage.getItem('isLoggedIn')).toBe(null);
+      expect(deleteCookie).toHaveBeenCalledWith('jwtToken');
     });
   });
 });

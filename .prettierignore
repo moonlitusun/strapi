@@ -3,3 +3,5 @@ test-apps
 dist
 build
 .strapi
+/.nx/cache
+/.nx/workspace-data

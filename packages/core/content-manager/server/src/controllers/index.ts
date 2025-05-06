@@ -5,6 +5,9 @@ import init from './init';
 import relations from './relations';
 import singleTypes from './single-types';
 import uid from './uid';
+import history from '../history';
+import preview from '../preview';
+import homepage from '../homepage';
 
 export default {
   'collection-types': collectionTypes,
@@ -14,4 +17,7 @@ export default {
   relations,
   'single-types': singleTypes,
   uid,
+  ...(history.controllers ? history.controllers : {}),
+  ...(preview.controllers ? preview.controllers : {}),
+  ...homepage.controllers,
 };

@@ -31,7 +31,7 @@ describe('ResetPassword', () => {
 
       fireEvent.click(getByRole('button', { name: 'Change password' }));
 
-      expect(await findByText('This value is required.')).toBeInTheDocument();
+      expect(await findByText('Passwords must match')).toBeInTheDocument();
     });
 
     it('should fail if we do not fill in the password field', async () => {
@@ -43,7 +43,8 @@ describe('ResetPassword', () => {
 
       fireEvent.click(getByRole('button', { name: 'Change password' }));
 
-      expect(await findByText('This value is required.')).toBeInTheDocument();
+      expect(await findByText('Password must be at least 8 characters')).toBeInTheDocument();
+      expect(await findByText('Passwords must match')).toBeInTheDocument();
     });
 
     it('should fail if the passwords do not match', async () => {
@@ -56,7 +57,33 @@ describe('ResetPassword', () => {
 
       fireEvent.click(getByRole('button', { name: 'Change password' }));
 
-      expect(await findByText('This value is required.')).toBeInTheDocument();
+      expect(await findByText('Passwords must match')).toBeInTheDocument();
+    });
+
+    it('should fail if the password is too short', async () => {
+      const { getByRole, findByText, getByLabelText, user } = render(<ResetPassword />, {
+        initialEntries: [{ search: '?code=test' }],
+      });
+
+      await user.type(getByLabelText('Password*'), 'aA1!');
+      await user.type(getByLabelText('Confirm Password*'), 'aA1!');
+
+      fireEvent.click(getByRole('button', { name: 'Change password' }));
+
+      expect(await findByText('Password must be at least 8 characters')).toBeInTheDocument();
+    });
+
+    it('should fail if the password is too long', async () => {
+      const { getByRole, findByText, getByLabelText, user } = render(<ResetPassword />, {
+        initialEntries: [{ search: '?code=test' }],
+      });
+
+      await user.type(getByLabelText('Password*'), 'aA1!' + 'a'.repeat(70));
+      await user.type(getByLabelText('Confirm Password*'), 'aA1!' + 'a'.repeat(70));
+
+      fireEvent.click(getByRole('button', { name: 'Change password' }));
+
+      expect(await findByText('Password must be less than 73 bytes')).toBeInTheDocument();
     });
   });
 });
