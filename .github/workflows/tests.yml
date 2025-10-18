@@ -238,7 +238,7 @@ jobs:
         # Add the Trunk Analytics Uploader step
       - name: Upload results to trunk
         if: '!cancelled()'
-        uses: trunk-io/analytics-uploader@main
+        uses: trunk-io/analytics-uploader@v1
         with:
           junit-paths: test-apps/junit-reports/*.xml
           org-slug: strapi
@@ -289,7 +289,7 @@ jobs:
       # Add the Trunk Analytics Uploader step
       - name: Upload results to trunk
         if: '!cancelled()'
-        uses: trunk-io/analytics-uploader@main
+        uses: trunk-io/analytics-uploader@v1
         with:
           junit-paths: test-apps/junit-reports/*.xml
           org-slug: strapi
@@ -372,7 +372,7 @@ jobs:
         shard: [1/4, 2/4, 3/4, 4/4]
     services:
       mysql:
-        image: bitnami/mysql:latest
+        image: bitnamilegacy/mysql:latest
         env:
           MYSQL_ROOT_PASSWORD: strapi
           MYSQL_USER: strapi
@@ -480,7 +480,7 @@ jobs:
         shard: [1/5, 2/5, 3/5, 4/5, 5/5]
     services:
       mysql:
-        image: bitnami/mysql:latest
+        image: bitnamilegacy/mysql:latest
         env:
           MYSQL_ROOT_PASSWORD: strapi
           MYSQL_USER: strapi
