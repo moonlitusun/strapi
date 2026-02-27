@@ -1,6 +1,6 @@
 export interface FeaturesConfig {
   future?: {
-    unstableAILocalizations?: boolean;
+    unstableMediaLibrary?: boolean;
   };
 }
 
